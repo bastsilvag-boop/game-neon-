@@ -41,6 +41,9 @@ Unity, TODO destructible, con dimensiones reales publicadas y texturas PBR propi
  Nombres de vehiculos = referencia dimensional; revisa marcas antes de uso comercial.
  Uso:  blender --background --python generate_destructible_assets.py
        (o Text Editor > Run Script). Salida: ~/Unity_Destructible_Military/
+ Modelos reales gratuitos (CC0/CC-BY): fetch_free_assets.py los descarga (Sketchfab, Poly
+ Pizza, ambientCG) y adapt_free_assets.py los convierte a este mismo pipeline. Las texturas
+ fotoescaneadas descargadas (ThirdParty/ambientcg) sustituyen a las procedurales. Ver README.md
 =====================================================================================
 """
 import bpy
@@ -49,6 +52,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from mathutils import Vector, Matrix, Euler, noise
 from mathutils.bvhtree import BVHTree
@@ -63,7 +67,12 @@ CHUNK_SCALE = 1.0         # multiplicador global de numero de chunks
 L2_MIN_VOLUME = 0.25      # m3: chunks L1 mayores se sub-fracturan (L2)
 UV_TILE = 1.0             # metros por repeticion UV (box mapping)
 MAX_CHUNKS_PER_PIECE = 14
+FRACTURE_MAX_FACES = 4000  # piezas mas densas (modelos descargados) se fracturan via proxy simplificado
 EXPORT = True
+try:                       # texturas fotoescaneadas CC0 (fetch_free_assets.py --sources ambientcg)
+    PHOTO_TEX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ThirdParty", "ambientcg")
+except NameError:
+    PHOTO_TEX_DIR = os.path.join(os.path.expanduser("~"), "ThirdParty", "ambientcg")
 
 # nombre: (RGB, metallic, roughness, alpha, emission)
 MATS = {
@@ -532,11 +541,16 @@ def band(path, thick, width, y=0.0, mat="Mat_Track_Steel", i0=0, i1=None, **kw):
 #  - espacio anisotropo: veta de madera (astillas), hiladas de ladrillo, estratos
 #  - las caras de corte se marcan como interiores (material de rotura)
 # ----------------------------------------------------------------------------------
-def clip(bm, co, no):
+SHELL_T = 0.025              # espesor (m) de las placas de fractura de mallas abiertas
+
+
+def clip(bm, co, no, fill=True):
     """Recorta el lado positivo del plano y rellena el corte (soporta huecos)."""
     no = V(no).normalized()
     bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:], dist=1e-6,
                            plane_co=co, plane_no=no, clear_outer=True)
+    if not fill:                # malla abierta (modelo externo): sin tapa, se solidifica despues
+        return
     edges = [e for e in bm.edges if e.is_boundary]
     if not edges:
         return
@@ -560,6 +574,20 @@ def split_piece(pc, co, no):
 def _inside(bvh, p):
     hit = bvh.find_nearest(p)
     return hit[0] is not None and (hit[0] - p).dot(hit[1]) > 0.0
+
+
+def solidify(bm, t):
+    """Da espesor a una cascara abierta; las caras nuevas (canto/dorso) son interiores."""
+    old = set(bm.faces)
+    bm.normal_update()
+    try:
+        bmesh.ops.solidify(bm, geom=bm.faces[:], thickness=t)
+    except Exception:
+        return
+    for f in bm.faces:
+        if f not in old:
+            f.material_index = 1
+    bm.normal_update()
 
 
 def _islands(bm):
@@ -616,6 +644,7 @@ def voronoi(pc, n, rng, impact=None, min_vol=2e-4):
     prof = PROFILES.get(pc.cls, PROFILES["concrete"])
     if n < 2 or not pc.frac:
         return [pc.copy()]
+    shell = pc.tag == "shell"   # malla abierta: fractura de cascara + solidificado
     S = Matrix.Diagonal((*aniso_for(pc, prof), 1.0))
     Si = S.inverted()
     work = pc.bm.copy()
@@ -633,7 +662,7 @@ def voronoi(pc, n, rng, impact=None, min_vol=2e-4):
             p = imp + V(rng.gauss(0, sig), rng.gauss(0, sig), rng.gauss(0, sig))
         else:
             p = V(rng.uniform(lo.x, hi.x), rng.uniform(lo.y, hi.y), rng.uniform(lo.z, hi.z))
-        if _inside(bvh, p) and all((p - s).length > max(size) * 0.02 for s in seeds):
+        if (shell or _inside(bvh, p)) and all((p - s).length > max(size) * 0.02 for s in seeds):
             seeds.append(p)
     if len(seeds) < 2:
         work.free()
@@ -647,11 +676,13 @@ def voronoi(pc, n, rng, impact=None, min_vol=2e-4):
             rmax = max(((v.co - s).length for v in cell.verts), default=0.0)
             if d * 0.5 > rmax:
                 break  # ningun bisector restante puede tocar la celda (poda exacta)
-            clip(cell, (s + q) * 0.5, (q - s) / d)
-            if len(cell.faces) < 4:
+            clip(cell, (s + q) * 0.5, (q - s) / d, fill=not shell)
+            if len(cell.faces) < (1 if shell else 4):
                 break
-        if len(cell.faces) >= 4:
+        if len(cell.faces) >= (1 if shell else 4):
             bmesh.ops.transform(cell, matrix=Si, verts=cell.verts[:])
+            if shell:
+                solidify(cell, SHELL_T)
             for isl in _islands(cell):
                 isl.normal_update()
                 p = Piece(isl, pc.mat, pc.cls, pc.grain, True, pc.tag)
@@ -809,23 +840,30 @@ def grounded(nb, anchored, alive):
 # ----------------------------------------------------------------------------------
 # OBJETOS BLENDER
 # ----------------------------------------------------------------------------------
-def _merge(dst, src, mi0, mi1, mi2, snow=None):
+def _merge(dst, src, mi0, mi1, mi2, snow=None, uvd=None, uv_done=None):
     vm = {v: dst.verts.new(v.co) for v in src.verts}
+    uvs = src.loops.layers.uv.active if (uvd is not None and src.loops.layers.uv) else None
     for f in src.faces:
         try:
             nf = dst.faces.new([vm[v] for v in f.verts])
         except ValueError:
             continue
+        if uvs is not None and f.material_index != 1:      # conserva el UV original (modelos externos)
+            for a, b in zip(f.loops, nf.loops):
+                b[uvd].uv = a[uvs].uv
+            uv_done.add(nf)
         nf.material_index = (mi0, mi1, mi2)[min(f.material_index, 2)]
         if snow is not None and f.material_index == 0 and f.normal.z > SNOW_NZ:
             nf.material_index = snow                      # nieve acumulada (variante Winter)
         nf.smooth = f.smooth
 
 
-def box_uv(bm, tiles=None):
+def box_uv(bm, tiles=None, skip=()):
     """UV caja en metros; cada material repite su textura cada tiles[slot] metros."""
     uv = bm.loops.layers.uv.get("UVMap") or bm.loops.layers.uv.new("UVMap")
     for f in bm.faces:
+        if f in skip:
+            continue
         s = 1.0 / (tiles[f.material_index] if tiles else UV_TILE)
         n = f.normal
         ax = max(range(3), key=lambda i: abs(n[i]))
@@ -849,6 +887,7 @@ def empty(name, parent=None, props=None):
 def make_obj(name, pieces, parent=None, props=None):
     """Fusiona piezas en UNA malla (pocos draw calls), triangula y aplica UV caja."""
     bm, slots = bmesh.new(), []
+    uvd, uv_done = bm.loops.layers.uv.new("UVMap"), set()
 
     def slot(m):
         m = remap(m)
@@ -867,13 +906,16 @@ def make_obj(name, pieces, parent=None, props=None):
         if VARIANT == "Winter" and remap(pc.mat) not in NO_SNOW and pc.cls != "glass" and \
                 any(f.material_index == 0 and f.normal.z > SNOW_NZ for f in pc.bm.faces):
             sn = slot("Mat_Snow")
-        _merge(bm, pc.bm, m0, m1, m2, sn)
+        _merge(bm, pc.bm, m0, m1, m2, sn, uvd, uv_done)
     if not bm.faces:
         bm.free()
         return None
-    bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method='BEAUTY', ngon_method='BEAUTY')
+    res = bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method='BEAUTY', ngon_method='BEAUTY')
+    for a, b in res.get("face_map", {}).items():            # triangulos heredan el "UV conservado"
+        if b in uv_done:
+            uv_done.add(a)
     bm.normal_update()
-    box_uv(bm, [tex_tile(m) for m in slots])
+    box_uv(bm, [tex_tile(m) for m in slots], uv_done)
     me = bpy.data.meshes.new(name)
     bm.to_mesh(me)
     bm.free()
@@ -897,11 +939,38 @@ def merge_pieces(pcs):
     return Piece(bm, pcs[0].mat, pcs[0].cls, pcs[0].grain, False, pcs[0].tag)
 
 
+def decimated_copy(pc, max_faces):
+    """Copia simplificada (Decimate) de una pieza densa: fracturas rapidas de modelos externos."""
+    if len(pc.bm.faces) <= max_faces:
+        return pc.copy()
+    me = bpy.data.meshes.new("_dec")
+    pc.bm.to_mesh(me)
+    ob = bpy.data.objects.new("_dec", me)
+    COLL.objects.link(ob)
+    mod = ob.modifiers.new("D", 'DECIMATE')
+    mod.ratio = max(0.02, max_faces / float(len(pc.bm.faces)))
+    dg = bpy.context.evaluated_depsgraph_get()
+    me2 = bpy.data.meshes.new_from_object(ob.evaluated_get(dg))
+    bm = bmesh.new()
+    bm.from_mesh(me2)
+    bpy.data.objects.remove(ob, do_unlink=True)
+    bpy.data.meshes.remove(me)
+    bpy.data.meshes.remove(me2)
+    bm.normal_update()
+    return Piece(bm, pc.mat, pc.cls, pc.grain, pc.frac, pc.tag)
+
+
+SHELL_MASS_T = 0.12          # espesor equivalente (m) para estimar la masa de mallas abiertas
+
+
 def mass_of(pieces, override_density=None):
     m = 0.0
     for pc in pieces:
         d = override_density or PROFILES.get(pc.cls, {}).get("dens", 1000)
-        m += pc.volume() * d
+        if pc.tag == "shell":    # cascara (modelo externo): area x espesor equivalente
+            m += sum(f.calc_area() for f in pc.bm.faces if f.material_index != 1) * SHELL_MASS_T * d
+        else:
+            m += pc.volume() * d
     return round(m, 2)
 
 
@@ -947,7 +1016,7 @@ def reset_scene(factory=False):
     COLL = sc.collection
 
 
-def export_asset(root, path_fbx):
+def export_asset(root, path_fbx, embed=False):
     if bpy.context.view_layer.objects.active and bpy.context.view_layer.objects.active.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
     objs = [root] + list(root.children_recursive)
@@ -974,7 +1043,8 @@ def export_asset(root, path_fbx):
         use_mesh_modifiers=True,
         add_leaf_bones=False,
         bake_anim=False,
-        path_mode='RELATIVE',                       # texturas en ../Textures
+        path_mode='COPY' if embed else 'RELATIVE',  # externos: texturas embebidas en el FBX
+        embed_textures=embed,
     )
 
 
@@ -1305,6 +1375,34 @@ def _save_img(name, rgb, path, non_color=False):
     return img
 
 
+def _photo_set(mat_name, folder):
+    """Texturas fotoescaneadas CC0 (ambientCG) si fueron descargadas para este material."""
+    src = os.path.join(PHOTO_TEX_DIR, mat_name)
+    if not os.path.isdir(src):
+        return None
+    files = []
+    for root_, _d, fs in os.walk(src):
+        files += [os.path.join(root_, f) for f in fs]
+    col = next((f for f in files if re.search(r"_Color\.(jpg|png)$", f, re.I)), None)
+    nrm = next((f for f in files if re.search(r"_NormalGL\.(jpg|png)$", f, re.I)), None)
+    if not col or not nrm:
+        return None
+    import shutil
+    out = []
+    for f, tag in ((col, "D"), (nrm, "N")):
+        dst = os.path.join(folder, "%s_%s%s" % (mat_name, tag, os.path.splitext(f)[1].lower()))
+        if not os.path.exists(dst):
+            shutil.copyfile(f, dst)
+        im = bpy.data.images.load(dst, check_existing=True)
+        if tag == "N":
+            try:
+                im.colorspace_settings.name = 'Non-Color'
+            except Exception:
+                pass
+        out.append(im)
+    return tuple(out)
+
+
 def texture_set(mat_name):
     """Genera (o reutiliza del disco) albedo + normal de un material."""
     spec = TEX_SPECS.get(mat_name)
@@ -1312,6 +1410,9 @@ def texture_set(mat_name):
         return None, None
     folder = os.path.join(OUTPUT_DIR, "Textures")
     os.makedirs(folder, exist_ok=True)
+    photo = _photo_set(mat_name, folder)
+    if photo:
+        return photo
     pd, pn = os.path.join(folder, f"{mat_name}_D.png"), os.path.join(folder, f"{mat_name}_N.png")
     if os.path.exists(pd) and os.path.exists(pn):
         imd = bpy.data.images.load(pd, check_existing=True)
@@ -1478,6 +1579,8 @@ def structure_states(asset, root, rng, man, lo, hi):
                     chunks.append({"pc": cl, "elem": ei, "blocks": blocks})
                 continue
             n = chunk_count(pc, prof["chunks"], asset.opt.get("chunk_scale", 1.0))
+            if len(pc.bm.faces) > FRACTURE_MAX_FACES:                  # modelos externos densos
+                pc = decimated_copy(pc, FRACTURE_MAX_FACES)
             plo, phi = pc.bounds()
             near = [p for p in impacts if all(plo[k] - 1.5 <= p[k] <= phi[k] + 1.5 for k in range(3))]
             imp = min(near, key=lambda p: (p - pc.center()).length) if near else None
@@ -1658,7 +1761,8 @@ def vehicle_states(asset, root, rng, man, lo, hi):
     body = [pc for p in parts if p.kind in ("hull", "body", "fuselage", "cab") for pc in p.pieces]
     secs = []
     for pc in body:
-        secs += voronoi(char(pc.copy()), max(2, min(5, chunk_count(pc, 2))), rng)
+        src = decimated_copy(pc, FRACTURE_MAX_FACES) if len(pc.bm.faces) > FRACTURE_MAX_FACES else pc.copy()
+        secs += voronoi(char(src), max(2, min(5, chunk_count(pc, 2))), rng)
     nb = contact_graph([[s] for s in secs]) if len(secs) > 1 else [set()]
     tot = sum(s.volume() for s in secs) or 1.0
     hull_mass = sum(p.mass for p in parts if p.kind in ("hull", "body", "fuselage", "cab"))
@@ -1837,6 +1941,11 @@ def process_asset(asset):
            "bounds_unity": [unity(lo), unity(hi)], "reference": asset.opt.get("ref", ""),
            "variant": VARIANT, "ground_offset": asset.opt.get("ground_offset", 0.0),
            "elements": [], "chunks": [], "debris": [], "states": {}}
+    cred = asset.opt.get("credits")
+    if cred:                                                   # atribucion (CC-BY) dentro del FBX
+        man["credits"] = cred
+        for k in ("title", "author", "license", "source"):
+            root["dst_" + k] = str(cred.get(k, ""))[:250]
     g0 = empty(f"{name}_Intact", root, {"dst_role": "state", "dst_state": 0})
     nb = contact_graph([p.pieces for p in parts]) if 1 < len(parts) < 400 else [set() for _ in parts]
     role = "part" if asset.mode == "vehicle" else "element"
@@ -1878,7 +1987,7 @@ def process_asset(asset):
     with open(os.path.join(folder, name + ".json"), "w", encoding="utf-8") as fh:
         json.dump(man, fh, indent=1)
     if EXPORT:
-        export_asset(root, os.path.join(folder, name + ".fbx"))
+        export_asset(root, os.path.join(folder, name + ".fbx"), embed=asset.opt.get("embed_textures", False))
     print("[OK] %-28s %-9s objs=%4d tris=%6d  %.1fs" % (name, asset.category, man["stats"]["objects"],
                                                         tris, time.time() - t0))
     return {"asset": name, "category": asset.category, "fbx": f"{asset.category}/{name}.fbx",
