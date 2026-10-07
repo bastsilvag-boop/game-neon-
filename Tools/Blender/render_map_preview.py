@@ -5,7 +5,7 @@ rio, assets en su estado real y cielo HDRI). Sirve para revisar un mapa sin abri
  blender -b --python render_map_preview.py -- --map Maps/Temperate_River_Valley/Temperate_River_Valley.json
          [--center 510,420] [--size 460] [--out preview3d.png] [--samples 48] [--res 1600x900]
          [--cam 150,28,330]  (azimut desde el sur en grados, elevacion, distancia en m)
-         [--hdri ruta.hdr]
+         [--hdri ruta.hdr] [--no-assets]
 """
 import argparse
 import json
@@ -133,6 +133,7 @@ def main():
     ap.add_argument("--cam", default="150,28,0")
     ap.add_argument("--hdri", default="")
     ap.add_argument("--max-trees", type=int, default=900, dest="max_trees")
+    ap.add_argument("--no-assets", action="store_true", dest="no_assets", help="solo terreno y agua (rapido)")
     a = ap.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
     info = json.load(open(a.map, encoding="utf-8"))
     map_dir = os.path.dirname(os.path.abspath(a.map))
@@ -194,7 +195,7 @@ def main():
         ow = bpy.data.objects.new("River", mw)
         sc.collection.objects.link(ow)
     # ---------------- assets
-    sel = [o for o in info["objects"] if abs(o["pos"][0] - cx) < half + 20 and abs(o["pos"][2] - cz) < half + 20]
+    sel = [o for o in info["objects"] if abs(o["pos"][0] - cx) < half + 20 and abs(o["pos"][2] - cz) < half + 20 and not a.no_assets]
     trees = [o for o in sel if o["category"] == "Vegetation"]
     if len(trees) > a.max_trees:
         keep = set(id(o) for o in trees[::max(1, len(trees) // a.max_trees)])

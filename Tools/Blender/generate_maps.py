@@ -440,14 +440,25 @@ class WarMap:
         self.roads.append({"kind": kind, "width": width, "points": P})
         return P
 
-    def river(self, pts, width, depth, water=True, bank=0.35, band=16.0):
+    def river(self, pts, width, depth, water=True, bank=0.3, band=70.0, follow_valley=True):
+        """Cauce: sigue el fondo del valle entre los puntos guia (camino de menor coste por
+        altura), fluye hacia el extremo mas bajo y funde las orillas con el terreno."""
+        if follow_valley:
+            path = []
+            for a, b in zip(pts[:-1], pts[1:]):
+                seg = self.least_cost_path(a, b, n=128, slope_w=5.0, low_w=40.0)
+                path += seg if not path else seg[1:]
+            pts = path
+        if self.height(*pts[0]) < self.height(*pts[-1]):
+            pts = pts[::-1]                                                # aguas abajo = extremo mas bajo
         P = catmull(pts, 4.0)
-        hs = np.array([self.height(x, z) for x, z in P])
-        bed = np.minimum.accumulate(moving_average(hs, 9)) - depth
+        hs = moving_average(np.array([self.height(x, z) for x, z in P]), 15)
+        bed = moving_average(np.minimum.accumulate(hs) - depth, 9)
         half = width / 2
         dist, bz = self.polyline_field(P, bed, half + band)
         carve = np.where(dist <= half, bz + depth * 1.05 * np.clip(dist / half, 0, 1) ** 2, bz + depth * 1.05 + (dist - half) * bank)
-        self.h = np.where(np.isfinite(dist), np.minimum(self.h, carve), self.h)
+        w = 1 - smooth(half + band * 0.55, half + band, dist)               # sin paredes: transicion suave
+        self.h = np.where(np.isfinite(dist), self.h * (1 - w) + np.minimum(self.h, carve) * w, self.h)
         self.m_wet = np.maximum(self.m_wet, 1 - smooth(half, half + 6, dist))
         self.m_dirt = np.maximum(self.m_dirt, (1 - smooth(half * 0.6, half + 3, dist)) * (0.9 if water else 1.0))
         if water:
@@ -674,10 +685,13 @@ class WarMap:
                 q = A + d * s
                 self.place(base, float(q[0]), float(q[1]), yaw_along_x(*d), check=False, **kw)
 
-    def least_cost_path(self, start, goal, n=160, slope_w=80.0):
+    def least_cost_path(self, start, goal, n=160, slope_w=80.0, low_w=0.0):
+        """Dijkstra en una malla gruesa: slope_w castiga la pendiente (carreteras) y low_w la
+        altura relativa (rios: buscan el fondo del valle)."""
         step = self.size / (n - 1)
         idx = np.linspace(0, self.res - 1, n).round().astype(int)
         hc = self.h[np.ix_(idx, idx)]
+        hn = (hc - hc.min()) / max(float(np.ptp(hc)), 1e-6)
         s = (int(round(start[1] / step)), int(round(start[0] / step)))
         g = (int(round(goal[1] / step)), int(round(goal[0] / step)))
         dist = {s: 0.0}
@@ -693,7 +707,7 @@ class WarMap:
                 if 0 <= a < n and 0 <= b < n:
                     L = step * L0
                     sl = abs(hc[a, b] - hc[i, j]) / L
-                    nd = d + L * (1 + slope_w * sl * sl) + (5000 if sl > 0.3 else 0)
+                    nd = d + L * (1 + slope_w * sl * sl + low_w * hn[a, b] ** 2) + (5000 if sl > 0.3 and not low_w else 0)
                     if nd < dist.get((a, b), 1e30):
                         dist[(a, b)] = nd
                         prev[(a, b)] = (i, j)
@@ -848,7 +862,7 @@ def map_desert_town(cat):
     m.h = h + dunes * (1 - smooth(4, 20, rocky))
     m.h -= m.h.min()
     m.m_rock = np.clip(smooth(0.55, 0.85, ridged(n, rng, base=10)) * smooth(12, 35, rocky), 0, 1)
-    m.river([(0, 300), (300, 380), (600, 330), (1024, 420)], 30, 3.2, water=False, bank=0.22, band=14)
+    m.river([(0, 300), (300, 380), (600, 330), (1024, 420)], 30, 3.2, water=False, bank=0.22, band=40, follow_valley=False)
     main = m.road([(520, 0), (510, 300), (512, 512), (530, 760), (560, 1024)], 8.0, "asphalt")
     m.road([(250, 520), (512, 512), (800, 540)], 6.0, "dirt")
     m.road([(530, 760), (700, 820), (790, 850)], 5.0, "dirt")
