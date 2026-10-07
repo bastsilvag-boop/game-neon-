@@ -1,6 +1,6 @@
 """
 =====================================================================================
- UNITY DESTRUCTIBLE MILITARY ASSET FACTORY v3  -  Blender (bpy) 4.2+ / 5.x
+ UNITY DESTRUCTIBLE MILITARY ASSET FACTORY v4  -  Blender (bpy) 4.2+ / 5.x
 =====================================================================================
 Genera proceduralmente (sin addons ni texturas externas) un catalogo optimizado para
 Unity, TODO destructible, con dimensiones reales publicadas y texturas PBR propias.
@@ -9,14 +9,22 @@ Unity, TODO destructible, con dimensiones reales publicadas y texturas PBR propi
                 HESCO MIL1, torre de vigilancia, bunker, contenedor 20 ft, muro de
                 bloques CMU, T-wall (Bremer), dientes de dragon, concertina
   Fortificacion trinchera recta y en zigzag, pozo de tirador, nido de ametralladora,
-                refugio de troncos, asentamiento de vehiculo (hull-down)
+                refugio de troncos, asentamiento de vehiculo (hull-down), pozo de
+                mortero 81 mm, control de carretera, tienda GP Medium, red de camuflaje
   Vehiculos     M1A2 SEPv3, Leopard 2A7, T-90M, T-72B3, M2A4 Bradley, CV90 MkIV,
                 BMP-2, M109A7, Gepard 1A2, ZSU-23-4 Shilka, Stryker, Boxer, BTR-82A,
-                JLTV, HMMWV, M-ATV, FMTV, technical Hilux+DShK, D9R blindado, sedan
-  Aereos/AA     AH-64E, UH-60M, Ka-52, AH-6, F-35A, MQ-9, Shahed-136, quadcoptero,
-                C-RAM Centurion; naval Mark VI; artilleria M777
+                JLTV, HMMWV, M-ATV, FMTV, Ural-4320, technical Hilux+DShK, D9R
+                blindado, sedan, autobus urbano, camion de reparto
+  Aereos/AA     AH-64E, UH-60M, Ka-52, Mi-24P, Mi-8MTV, AH-6, F-35A, MQ-9, Bayraktar
+                TB2, Shahed-136, quadcoptero, C-RAM Centurion, radar sobre remolque;
+                naval Mark VI; artilleria M777, M142 HIMARS, BM-21 Grad
   Edificios     casa, casa 2 plantas, bloque 4 plantas, refugio HAS, compound de
-                adobe (qalat), casa desertica de techo plano, granero
+                adobe (qalat), casa desertica de techo plano, granero, iglesia con
+                campanario, mezquita con alminar, nave industrial, chimenea de 35 m
+                (cae como un arbol), gasolinera, muro en ruinas, montones de escombro
+  Mapa          calzada urbana, cruce, camino de tierra, torre de alta tension, mastil
+                atirantado 40 m, deposito elevado, tanque de combustible, puente de
+                3 vanos (si cae una pila cae el vano), helipuerto, pista, farola, valla
   Terreno/Veg.  terreno solido por tiles, roca, crateres, pino, roble, palmera, arbol
                 seco, arbusto, hierba, poste electrico, valla
   Variantes     Temperate / Desert / Winter (remapeo de materiales + nieve acumulada)
@@ -53,6 +61,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 from mathutils import Vector, Matrix, Euler, noise
 from mathutils.bvhtree import BVHTree
@@ -1344,6 +1353,16 @@ def _pattern(kind, base, p, rng):
         if p.get("dry"):
             col = _mix(col, _col((0.25, 0.15, 0.07), sh), np.clip((n1 - 0.5) * 3, 0, 1) * 0.6)
         h = cl
+    elif kind == "asphalt":
+        agg = _noise(rng, 160, 160, 1)
+        stones = np.clip((agg - 0.68) * 8, 0, 1)
+        ridged = 1 - np.abs(_noise(rng, 4, 4, 5) * 2 - 1)
+        crack = np.clip((ridged - 0.965) * 30, 0, 1) * p.get("cracks", 1.0)
+        patch = np.clip((_noise(rng, 2, 2, 4) - 0.62) * 5, 0, 1)
+        col = col * (0.8 + 0.35 * agg + 0.12 * n1)[..., None]
+        col = _mix(col, _col((0.20, 0.20, 0.19), sh), stones * 0.45)
+        col = _mix(col, _col((0.035, 0.035, 0.035), sh), np.clip(patch * 0.55 + crack * 0.85, 0, 1))
+        h = agg * 0.35 + stones * 0.3 - crack * 0.6 + n2 * 0.15
     elif kind == "charred":
         ash = np.clip((_noise(rng, 6, 6, 4) - 0.55) * 3, 0, 1)
         ember = np.clip((n2 - 0.8) * 5, 0, 1) * (0 if p.get("soot") else 1)
@@ -1941,6 +1960,14 @@ def process_asset(asset):
            "bounds_unity": [unity(lo), unity(hi)], "reference": asset.opt.get("ref", ""),
            "variant": VARIANT, "ground_offset": asset.opt.get("ground_offset", 0.0),
            "elements": [], "chunks": [], "debris": [], "states": {}}
+    if asset.opt.get("holes"):                                 # hueco a recortar en el Terrain (trincheras, pozos)
+        TM = asset.opt["_T"] @ asset.opt["_M"]
+        man["terrain_holes"] = []
+        for cx, cy, L, w, ang in asset.opt["holes"]:
+            c = TM @ V(cx, cy, 0)
+            d = (TM.to_3x3() @ V(math.cos(math.radians(ang)), math.sin(math.radians(ang)), 0)).normalized()
+            man["terrain_holes"].append({"center_xz": [round(-c.x, 4), round(-c.y, 4)], "axis_xz": [round(-d.x, 4), round(-d.y, 4)],
+                                         "length": round(L, 3), "width": round(w, 3)})
     cred = asset.opt.get("credits")
     if cred:                                                   # atribucion (CC-BY) dentro del FBX
         man["credits"] = cred
@@ -2567,15 +2594,16 @@ def blade(root, length, chord, z, ang, mat="Mat_Rotor_Blade", thick=0.04, droop=
 def build_heli(name):
     s = HELIS[name]
     FL, FW, FH, P = s["FL"], s["FW"], s["FH"], s["paint"]
+    k = s.get("k", 1.0)                                # escala longitudinal de las estaciones (fuselajes > 15 m)
     parts = []
     gz = 0.55                                          # altura del tren
     x0 = FL * 0.5
-    secs = [(x0, 0.05, 0.05, gz + FH * 0.45), (x0 - 0.6, FW * 0.3, FH * 0.3, gz + FH * 0.45),
-            (x0 - 1.8, FW * 0.45, FH * 0.45, gz + FH * 0.5), (x0 - 4.0, FW * 0.5, FH * 0.5, gz + FH * 0.52),
-            (x0 - 6.5, FW * 0.5, FH * 0.5, gz + FH * 0.55), (x0 - 8.0, FW * 0.3, FH * 0.32, gz + FH * 0.68)]
+    secs = [(x0, 0.05, 0.05, gz + FH * 0.45), (x0 - 0.6 * k, FW * 0.3, FH * 0.3, gz + FH * 0.45),
+            (x0 - 1.8 * k, FW * 0.45, FH * 0.45, gz + FH * 0.5), (x0 - 4.0 * k, FW * 0.5, FH * 0.5, gz + FH * 0.52),
+            (x0 - 6.5 * k, FW * 0.5, FH * 0.5, gz + FH * 0.55), (x0 - 8.0 * k, FW * 0.3, FH * 0.32, gz + FH * 0.68)]
     fus = loft(ell_rings(secs, 12), mat=P, cls="metal", smooth=True)
     parts.append(Part("Fuselage", [fus], "metal", kind="fuselage"))
-    xb = x0 - 8.0
+    xb = x0 - 8.0 * k
     tail_secs = [(xb + 0.3, FW * 0.3, FH * 0.32, gz + FH * 0.68), (-FL * 0.5 + 0.6, 0.18, 0.22, gz + FH * 0.75), (-FL * 0.5, 0.12, 0.15, gz + FH * 0.78)]
     boom = loft(ell_rings(tail_secs, 8), mat=P, cls="metal", smooth=True)
     xt = -FL * 0.5 + 0.4
@@ -2587,19 +2615,19 @@ def build_heli(name):
                                        0.1, axis='y', offset=sy * 1.6, mat=P, cls="metal") for sy in (-1, 1)]
     parts.append(Part("TailBoom", tparts, "metal", kind="tail", pivot=(xb + 0.3, 0, gz + FH * 0.68), axis=(0, 1, 0), joint="break"))
     hub_z = s["H"] - 0.45
-    mast = [cyl(0.18, hub_z - (gz + FH), (x0 - 4.5, 0, (hub_z + gz + FH) / 2), mat="Mat_Metal_Gunmetal", segs=10, cls="metal")]
-    eng = [hull(sym([(x0 - 2.6, FW * 0.35, gz + FH * 0.9), (x0 - 3.2, FW * 0.3, gz + FH + 0.55), (x0 - 7.0, FW * 0.3, gz + FH + 0.5),
-                     (x0 - 7.8, FW * 0.25, gz + FH * 0.8)]), mat=P, cls="metal")]
+    mast = [cyl(0.18, hub_z - (gz + FH), (x0 - 4.5 * k, 0, (hub_z + gz + FH) / 2), mat="Mat_Metal_Gunmetal", segs=10, cls="metal")]
+    eng = [hull(sym([(x0 - 2.6 * k, FW * 0.35, gz + FH * 0.9), (x0 - 3.2 * k, FW * 0.3, gz + FH + 0.55), (x0 - 7.0 * k, FW * 0.3, gz + FH + 0.5),
+                     (x0 - 7.8 * k, FW * 0.25, gz + FH * 0.8)]), mat=P, cls="metal")]
     if s.get("tandem"):
         for sy in (-1, 1):
-            eng.append(cyl(0.38, 2.6, (x0 - 5.0, sy * (FW * 0.5 + 0.3), gz + FH * 0.9), (0, 90, 0), mat=P, segs=10, cls="metal"))
+            eng.append(cyl(0.38, 2.6, (x0 - 5.0 * k, sy * (FW * 0.5 + 0.3), gz + FH * 0.9), (0, 90, 0), mat=P, segs=10, cls="metal"))
     parts.append(Part("EngineDeck", eng + mast, "metal", kind="body"))
     rot_list = [(hub_z, 0)] + ([(hub_z - 0.9, 60)] if s.get("coax") else [])
     for ri, (hz, off) in enumerate(rot_list):
-        rp = [cyl(0.32, 0.25, (x0 - 4.5, 0, hz), mat="Mat_Metal_Gunmetal", segs=10, cls="metal")]
+        rp = [cyl(0.32, 0.25, (x0 - 4.5 * k, 0, hz), mat="Mat_Metal_Gunmetal", segs=10, cls="metal")]
         for k in range(s["blades"]):
-            rp.append(blade((x0 - 4.5, 0, hz), s["rotor"] / 2, 0.53, hz, off + k * 360 / s["blades"], droop=0.15))
-        parts.append(Part(f"MainRotor_{ri}", rp, "metal", kind="rotor", pivot=(x0 - 4.5, 0, hz), axis=(0, 0, 1), joint="spin"))
+            rp.append(blade((x0 - 4.5 * k, 0, hz), s["rotor"] / 2, 0.53, hz, off + k * 360 / s["blades"], droop=0.15))
+        parts.append(Part(f"MainRotor_{ri}", rp, "metal", kind="rotor", pivot=(x0 - 4.5 * k, 0, hz), axis=(0, 0, 1), joint="spin"))
     if not s.get("coax"):
         tr = [cyl(0.12, 0.15, (xt, 0.25, gz + FH * 0.7 + 1.3), (90, 0, 0), mat="Mat_Metal_Gunmetal", segs=8, cls="metal")]
         for k in range(4):
@@ -2609,34 +2637,34 @@ def build_heli(name):
         parts.append(Part("TailRotor", tr, "metal", kind="rotor", tags=("tail",), pivot=(xt, 0.32, gz + FH * 0.7 + 1.3), axis=(0, 1, 0), joint="spin"))
     # cabina acristalada
     if s.get("tandem"):
-        can = hull(sym([(x0 - 0.7, 0.3, gz + FH * 0.65), (x0 - 1.6, 0.42, gz + FH * 1.05), (x0 - 3.6, 0.45, gz + FH * 1.15),
-                        (x0 - 4.2, 0.4, gz + FH * 0.9), (x0 - 3.9, 0.45, gz + FH * 0.7)]), mat="Mat_Glass_Canopy", cls="glass")
+        can = hull(sym([(x0 - 0.7 * k, 0.3, gz + FH * 0.65), (x0 - 1.6 * k, 0.42, gz + FH * 1.05), (x0 - 3.6 * k, 0.45, gz + FH * 1.15),
+                        (x0 - 4.2 * k, 0.4, gz + FH * 0.9), (x0 - 3.9 * k, 0.45, gz + FH * 0.7)]), mat="Mat_Glass_Canopy", cls="glass")
     else:
-        can = hull(sym([(x0 - 0.5, FW * 0.25, gz + FH * 0.55), (x0 - 1.3, FW * 0.42, gz + FH * 0.95), (x0 - 2.3, FW * 0.45, gz + FH * 0.98),
-                        (x0 - 2.4, FW * 0.47, gz + FH * 0.5), (x0 - 1.0, FW * 0.35, gz + FH * 0.35)]), mat="Mat_Glass_Canopy", cls="glass")
+        can = hull(sym([(x0 - 0.5 * k, FW * 0.25, gz + FH * 0.55), (x0 - 1.3 * k, FW * 0.42, gz + FH * 0.95), (x0 - 2.3 * k, FW * 0.45, gz + FH * 0.98),
+                        (x0 - 2.4 * k, FW * 0.47, gz + FH * 0.5), (x0 - 1.0 * k, FW * 0.35, gz + FH * 0.35)]), mat="Mat_Glass_Canopy", cls="glass")
     parts.append(Part("Canopy", [can], "glass", kind="glass"))
     gear = []
     for sy in (-1, 1):
-        gear.append(strut((x0 - 3.0, sy * FW * 0.45, gz + 0.3), (x0 - 3.0, sy * (FW * 0.5 + 0.6), 0.32), 0.05, "Mat_Metal_Gunmetal", 6, cls="metal"))
-        gear.append(cyl(0.3, 0.2, (x0 - 3.0, sy * (FW * 0.5 + 0.65), 0.3), (90, 0, 0), mat="Mat_Rubber_Tire", segs=10, cls="rubber"))
+        gear.append(strut((x0 - 3.0 * k, sy * FW * 0.45, gz + 0.3), (x0 - 3.0 * k, sy * (FW * 0.5 + 0.6), 0.32), 0.05, "Mat_Metal_Gunmetal", 6, cls="metal"))
+        gear.append(cyl(0.3, 0.2, (x0 - 3.0 * k, sy * (FW * 0.5 + 0.65), 0.3), (90, 0, 0), mat="Mat_Rubber_Tire", segs=10, cls="rubber"))
     gear.append(cyl(0.18, 0.12, (-FL * 0.5 + 1.5, 0, 0.18 + gz * 0.4), (90, 0, 0), mat="Mat_Rubber_Tire", segs=8, cls="rubber"))
     gear.append(strut((-FL * 0.5 + 1.5, 0, 0.3 + gz * 0.4), (-FL * 0.5 + 1.6, 0, gz + FH * 0.72), 0.04, "Mat_Metal_Gunmetal", 6, cls="metal"))
     parts.append(Part("LandingGear", gear, "metal", kind="gear"))
     if s.get("stubs"):
         for side, sy in (("L", 1), ("R", -1)):
             span = s["stubs"] / 2
-            w = [prism([(x0 - 5.6, 0), (x0 - 4.6, 0), (x0 - 4.8, span), (x0 - 5.6, span)], 0.12, axis='z', offset=gz + FH * 0.75, mat=P, cls="metal")]
+            w = [prism([(x0 - 5.6 * k, 0), (x0 - 4.6 * k, 0), (x0 - 4.8 * k, span), (x0 - 5.6 * k, span)], 0.12, axis='z', offset=gz + FH * 0.75, mat=P, cls="metal")]
             w[0].transform(Matrix.Diagonal((1, sy, 1, 1)))
             for k in (0.55, 0.95):
-                w.append(cyl(0.2, 1.6, (x0 - 5.1, sy * span * k, gz + FH * 0.55), (0, 90, 0), mat="Mat_Metal_Gunmetal", segs=8, cls="metal"))
-            parts.append(Part(f"StubWing_{side}", w, "metal", kind="wing", pivot=(x0 - 5.1, sy * FW * 0.5, gz + FH * 0.75), axis=(1, 0, 0), joint="break"))
-        parts.append(Part("ChinGun", [box((0.5, 0.45, 0.35), (x0 - 1.2, 0, gz + 0.25), mat="Mat_Metal_Gunmetal", cls="metal"),
-                                      cyl(0.04, 1.7, (x0 - 0.1, 0, gz + 0.2), (0, 90, 0), mat="Mat_Metal_Gunmetal", segs=6, cls="metal")],
-                          "metal", kind="detail", pivot=(x0 - 1.2, 0, gz + 0.25), axis=(0, 0, 1), joint="yaw"))
+                w.append(cyl(0.2, 1.6, (x0 - 5.1 * k, sy * span * k, gz + FH * 0.55), (0, 90, 0), mat="Mat_Metal_Gunmetal", segs=8, cls="metal"))
+            parts.append(Part(f"StubWing_{side}", w, "metal", kind="wing", pivot=(x0 - 5.1 * k, sy * FW * 0.5, gz + FH * 0.75), axis=(1, 0, 0), joint="break"))
+        parts.append(Part("ChinGun", [box((0.5, 0.45, 0.35), (x0 - 1.2 * k, 0, gz + 0.25), mat="Mat_Metal_Gunmetal", cls="metal"),
+                                      cyl(0.04, 1.7, (x0 - 0.1 * k, 0, gz + 0.2), (0, 90, 0), mat="Mat_Metal_Gunmetal", segs=6, cls="metal")],
+                          "metal", kind="detail", pivot=(x0 - 1.2 * k, 0, gz + 0.25), axis=(0, 0, 1), joint="yaw"))
     else:
         for side, sy in (("L", 1), ("R", -1)):
-            d = [box((1.6, 0.05, FH * 0.75), (x0 - 4.0, sy * (FW * 0.5 + 0.01), gz + FH * 0.45), mat=P, cls="metal")]
-            parts.append(Part(f"CabinDoor_{side}", d, "metal", kind="door", pivot=(x0 - 4.0, sy * FW * 0.5, gz + FH * 0.45), axis=(1, 0, 0), joint="slide"))
+            d = [box((1.6, 0.05, FH * 0.75), (x0 - 4.0 * k, sy * (FW * 0.5 + 0.01), gz + FH * 0.45), mat=P, cls="metal")]
+            parts.append(Part(f"CabinDoor_{side}", d, "metal", kind="door", pivot=(x0 - 4.0 * k, sy * FW * 0.5, gz + FH * 0.45), axis=(1, 0, 0), joint="slide"))
     return Asset(name, "Aircraft", "vehicle", parts, forward_x=True, mass=s["mass"], ref=s["ref"], lod=(1.0, 0.5, 0.2))
 
 
@@ -3379,10 +3407,16 @@ def build_barn(name):
 
 
 # ---------------------------------- trincheras ----------------------------------------
-def trench_path_parts(path, depth=1.6, w=1.0, lining="planks", berm=True, top_bags=False):
+TRENCH_HOLES = []        # rectangulos (cx, cy, largo, ancho, angulo) del ultimo trench_path_parts -> agujeros del Terrain
+
+
+def trench_path_parts(path, depth=1.6, w=1.0, lining="planks", berm=True, top_bags=False, caps=(True, True)):
     """Trinchera a lo largo de una polilinea: revestimiento (tablas o sacos), postes,
-    tarima, parapeto y parados de tierra. Base (fondo) en z=0; terreno en z=depth."""
+    tarima, parapeto y parados de tierra. Base (fondo) en z=0; terreno en z=depth.
+    Cierra los extremos y deja en TRENCH_HOLES el hueco a recortar en el terreno de Unity."""
     parts = []
+    del TRENCH_HOLES[:]
+    last = len(path) - 2
     for k in range(len(path) - 1):
         a, b = V((*path[k], 0)), V((*path[k + 1], 0))
         d = b - a
@@ -3391,7 +3425,21 @@ def trench_path_parts(path, depth=1.6, w=1.0, lining="planks", berm=True, top_ba
         nrm = V(-dn.y, dn.x, 0)
         ang = math.degrees(math.atan2(dn.y, dn.x))
         mid = (a + b) / 2
+        e0, e1 = (w / 2 if k > 0 else 0.0), (w / 2 if k < last else 0.0)      # solape en los quiebros
+        hc = mid + dn * ((e1 - e0) / 2)
+        TRENCH_HOLES.append((hc.x, hc.y, L + e0 + e1, w + 0.12, ang))
         lin = []
+        for end, q0, sg in ((k == 0 and caps[0], a, -1), (k == last and caps[1], b, 1)):   # testeros (extremos cerrados)
+            if not end:
+                continue
+            q = q0 + dn * sg * 0.03
+            if lining == "planks":
+                lin += [box((0.05, w + 0.12, 0.24), (q.x, q.y, 0.125 + z * 0.25), (0, 0, ang), mat="Mat_Wood_Plank", cls="wood", grain="y")
+                        for z in range(int(depth / 0.25))]
+            else:
+                q = q0 + dn * sg * 0.18
+                lin += [box((0.3, w + 0.2, 0.13), (q.x, q.y, 0.07 + z * 0.14), (0, 0, ang), mat="Mat_Fabric_Sandbag", bevel=0.03, cls="fabric")
+                        for z in range(int(depth / 0.14))]
         for sgn in (-1, 1):
             c = mid + nrm * sgn * (w / 2 + 0.03)
             if lining == "planks":
@@ -3428,14 +3476,14 @@ def build_trench_straight(name):
     parts.append(Part("Parapet_Sandbags", [box((0.6, 0.3, 0.14), (-3.0 + k * 0.62, 1.05, 1.6 + 0.45 + 0.07), mat="Mat_Fabric_Sandbag", bevel=0.03, cls="fabric")
                                            for k in range(10)], "fabric"))
     return Asset(name, "Fortifications", "structure", parts, n_impacts=1, dmg_r=1.0, ruin_h=0.45, spread=0.3, rubble_cell=2.0,
-                 debris="earth", ground_offset=-1.6, lod=(1.0,), ref="Trinchera de tirador revestida: 1.6 m de profundidad, 1 m de ancho")
+                 debris="earth", ground_offset=-1.6, holes=list(TRENCH_HOLES), lod=(1.0,), ref="Trinchera de tirador revestida: 1.6 m de profundidad, 1 m de ancho")
 
 
 def build_trench_zigzag(name):
     path = [(-8, 0), (-4.5, 0), (-3.5, 1.6), (0.5, 1.6), (1.5, 0), (5.0, 0), (6.0, 1.6), (9.0, 1.6)]
     parts = trench_path_parts(path, lining="planks", top_bags=True)
     return Asset(name, "Fortifications", "structure", parts, n_impacts=2, dmg_r=1.0, ruin_h=0.45, spread=0.3, rubble_cell=2.0,
-                 debris="earth", ground_offset=-1.6, lod=(1.0,), ref="Trinchera en zigzag (bahias de tiro y traveses), tablestacado + sacos")
+                 debris="earth", ground_offset=-1.6, holes=list(TRENCH_HOLES), lod=(1.0,), ref="Trinchera en zigzag (bahias de tiro y traveses), tablestacado + sacos")
 
 
 def build_foxhole(name):
@@ -3445,7 +3493,7 @@ def build_foxhole(name):
     parts.append(Part("OverheadCover_Logs", logs, "wood"))
     parts.append(Part("OverheadCover_Soil", [box((1.0, 1.7, 0.4), (-0.1, 0, 1.4 + 0.8), mat="Mat_Terrain_Soil", cls="earth")], "earth"))
     return Asset(name, "Fortifications", "structure", parts, n_impacts=1, dmg_r=0.8, ruin_h=0.5, spread=0.3, rubble_cell=1.5,
-                 debris="earth", ground_offset=-1.4, lod=(1.0,), ref="Pozo de tirador para 2 (FM 21-75): parapeto frontal 18 in")
+                 debris="earth", ground_offset=-1.4, holes=list(TRENCH_HOLES), lod=(1.0,), ref="Pozo de tirador para 2 (FM 21-75): parapeto frontal 18 in")
 
 
 def build_mg_nest(name):
@@ -3467,7 +3515,7 @@ def build_mg_nest(name):
     gun += [strut((0, 0.8, 1.1), (sx * 0.35, 0.6 + abs(sx) * 0.1, 0.6), 0.015, "Mat_Metal_Gunmetal", 4, cls="metal") for sx in (-1, 0, 1)]
     parts.append(Part("MG_Tripod", gun, "metal", kind="detail"))
     return Asset(name, "Fortifications", "structure", parts, n_impacts=1, dmg_r=0.9, ruin_h=0.35, spread=0.5, rubble_cell=1.5,
-                 debris="fabric", ground_offset=-0.6, lod=(1.0,), ref="Nido de ametralladora de sacos terreros, anillo de 3.2 m")
+                 debris="fabric", ground_offset=-0.6, holes=list(TRENCH_HOLES), lod=(1.0,), ref="Nido de ametralladora de sacos terreros, anillo de 3.2 m")
 
 
 def build_dugout(name):
@@ -3497,10 +3545,14 @@ def build_dugout(name):
     parts.append(Part("EarthCover", [hull([(sx * (W / 2 + 0.8), sy * (D / 2 + 0.8), H + 0.26) for sx in (-1, 1) for sy in (-1, 1)] +
                                           [(sx * (W / 2 - 0.4), sy * (D / 2 - 0.4), H + 0.9) for sx in (-1, 1) for sy in (-1, 1)],
                                           mat="Mat_Terrain_Soil", cls="earth")], "earth"))
-    ramp = [box((1.1, 0.3, 0.16), (0, -D / 2 - 0.25 - k * 0.3, H - 0.18 - k * 0.2), mat="Mat_Wood_Plank", cls="wood", grain="x") for k in range(9)]
+    parts.append(Part("Floor", [box((W - 0.1, D - 0.1, 0.05), (0, 0, 0.025), mat="Mat_Wood_Plank", cls="wood", grain="x")], "wood", kind="floor"))
+    entry = trench_path_parts([(0.0, -D / 2 - 0.1), (0.0, -D / 2 - 3.0)], depth=H, w=1.1, berm=False, caps=(False, True))
+    parts += [p for p in entry if not p.name.startswith("Duckboard")]
+    ramp = [box((1.0, 0.3, 0.16), (0, -D / 2 - 0.35 - k * 0.3, 0.12 + k * 0.21), mat="Mat_Wood_Plank", cls="wood", grain="x") for k in range(9)]
     parts.append(Part("EntranceSteps", ramp, "wood"))
     return Asset(name, "Fortifications", "structure", parts, n_impacts=1, dmg_r=1.3, ruin_h=0.45, spread=0.3, rubble_cell=2.0,
-                 debris="wood", ground_offset=-2.0, lod=(1.0,), ref="Refugio (dugout) de troncos con cubierta de tierra 0.6 m")
+                 debris="wood", ground_offset=-2.0, holes=list(TRENCH_HOLES), lod=(1.0,),
+                 ref="Refugio (dugout) de troncos con cubierta de tierra 0.6 m")
 
 
 def build_revetment(name):
@@ -3732,6 +3784,951 @@ def build_quad(name):
 
 
 # ==================================================================================
+# BUILDERS v4: INFRAESTRUCTURA DE MAPA (medidas reales)
+# ==================================================================================
+MATS.update({
+    "Mat_Asphalt": ((0.09, 0.09, 0.09), 0.0, 0.9, 1, 0),
+    "Mat_Road_Paint": ((0.85, 0.85, 0.82), 0.0, 0.6, 1, 0),
+    "Mat_Paving": ((0.45, 0.44, 0.42), 0.0, 0.9, 1, 0),
+    "Mat_Steel_Galvanized": ((0.55, 0.57, 0.58), 0.9, 0.45, 1, 0),
+    "Mat_Bus_Paint": ((0.75, 0.62, 0.12), 0.5, 0.4, 1, 0),
+    "Mat_Tent_Canvas": ((0.33, 0.33, 0.22), 0.0, 1.0, 1, 0),
+    "Mat_Camo_Net": ((0.18, 0.22, 0.12), 0.0, 1.0, 1, 0),
+    "Mat_Aircraft_Grey": ((0.46, 0.48, 0.50), 0.3, 0.45, 1, 0),
+})
+TEX_SPECS.update({
+    "Mat_Asphalt": ("asphalt", {}, 3.0, 2.0),
+    "Mat_Road_Paint": ("metal_paint", dict(chips=0.45, dust=0.35), 1.0, 0.5),
+    "Mat_Paving": ("bricks", dict(rows=10, cols=5, mortar=0.006, mcol=(0.3, 0.3, 0.29)), 1.0, 2.0),
+    "Mat_Steel_Galvanized": ("metal_paint", dict(chips=0.0, dust=0.25, brushed=True, rust=0.15), 1.0, 0.6),
+    "Mat_Bus_Paint": ("metal_paint", dict(chips=0.15, dust=0.3), 2.0, 0.5),
+    "Mat_Tent_Canvas": ("fabric", dict(weave=50), 2.0, 1.5),
+    "Mat_Camo_Net": ("camo", dict(cols=((0.18, 0.22, 0.12), (0.30, 0.26, 0.15), (0.08, 0.10, 0.06)), ratio=(0.45, 0.6)), 2.0, 2.0),
+    "Mat_Aircraft_Grey": ("metal_paint", dict(chips=0.04, dust=0.12), 2.0, 0.4),
+})
+VARIANT_REMAP["Desert"].update({"Mat_Camo_Net": "Mat_Fabric_Sandbag", "Mat_Tent_Canvas": "Mat_Fabric_Sandbag"})
+VARIANT_REMAP["Winter"].update({"Mat_Camo_Net": "Mat_Military_Winter"})
+
+
+def _road_marks(L, W, z):
+    m = [box((3.0, 0.12, 0.01), (-L / 2 + 1.5 + k * 6.0, 0, z), mat="Mat_Road_Paint", cls="concrete", frac=False) for k in range(int(L / 6))]
+    m += [box((L, 0.15, 0.01), (0, sy * (W / 2 - 0.3), z), mat="Mat_Road_Paint", cls="concrete", frac=False) for sy in (-1, 1)]
+    return m
+
+
+def build_road_asphalt(name):
+    """Calzada urbana 12 m: 2 carriles de 3.5 m, bordillo 15 cm, aceras de 2.5 m."""
+    L, W, side = 12.0, 7.0, 2.5
+    parts = [Part("Asphalt", [box((L, W, 0.12), (0, 0, 0.06), mat="Mat_Asphalt", cls="concrete")], "concrete"),
+             Part("Markings", _road_marks(L, W, 0.125), "concrete", kind="detail")]
+    for k, sy in enumerate((-1, 1)):
+        parts.append(Part(f"Curb_{k}", [box((L, 0.3, 0.27), (0, sy * (W / 2 + 0.15), 0.135), mat="Mat_Concrete_Base", cls="concrete")], "concrete"))
+        parts.append(Part(f"Sidewalk_{k}", [box((L, side, 0.22), (0, sy * (W / 2 + 0.3 + side / 2), 0.11), mat="Mat_Paving", cls="concrete")], "concrete"))
+    return Asset(name, "Map", "structure", parts, n_impacts=1, dmg_r=1.8, ruin_h=1.0, spread=0.15, rubble_cell=3.0,
+                 debris="concrete", lod=(1.0,), ref="Via urbana: 2 carriles x 3.5 m, bordillo 0.15 m, acera 2.5 m (modulo 12 m)")
+
+
+def build_road_intersection(name):
+    S, W = 14.0, 7.0
+    parts = [Part("Asphalt", [box((S, S, 0.12), (0, 0, 0.06), mat="Mat_Asphalt", cls="concrete")], "concrete")]
+    zebra = []
+    for ang in (0, 90, 180, 270):
+        R = Matrix.Rotation(math.radians(ang), 4, 'Z')
+        for k in range(7):
+            zebra.append(box((2.5, 0.5, 0.01), (S / 2 - 1.6, -W / 2 + 0.5 + k * 1.0, 0.125), mat="Mat_Road_Paint", cls="concrete", frac=False).transform(R))
+    parts.append(Part("Crosswalks", zebra, "concrete", kind="detail"))
+    for k, (sx, sy) in enumerate(((1, 1), (1, -1), (-1, 1), (-1, -1))):
+        c = [box((3.5, 3.5, 0.22), (sx * (S / 2 + 1.75), sy * (S / 2 + 1.75), 0.11), mat="Mat_Paving", cls="concrete")]
+        parts.append(Part(f"Corner_{k}", c, "concrete"))
+    return Asset(name, "Map", "structure", parts, n_impacts=1, dmg_r=2.0, ruin_h=1.0, spread=0.15, rubble_cell=3.0,
+                 debris="concrete", lod=(1.0,), ref="Cruce urbano 14 x 14 m con pasos de cebra")
+
+
+def build_road_dirt(name):
+    """Camino de tierra 12 x 4 m con roderas de vehiculo."""
+    prof = [(-2.0, 0), (2.0, 0), (2.0, 0.08), (1.0, 0.08), (0.85, 0.03), (0.55, 0.03), (0.4, 0.08), (-0.4, 0.08),
+            (-0.55, 0.03), (-0.85, 0.03), (-1.0, 0.08), (-2.0, 0.08)]
+    p = prism(prof, 12.0, axis='x', mat="Mat_Terrain_Soil", cls="earth")
+    return Asset(name, "Map", "structure", [Part("DirtRoad", [p], "earth")], n_impacts=1, dmg_r=1.5, ruin_h=1.0, spread=0.1,
+                 rubble_cell=3.0, debris="earth", lod=(1.0,), ref="Camino de tierra 4 m con roderas (modulo 12 m)")
+
+
+def lattice_tower(H, b0, b1, levels, n_legs=4, mat="Mat_Steel_Galvanized", leg_w=0.25, strut_r=0.05):
+    """Torre de celosia: patas inclinadas + riostras en X por nivel. Devuelve [Part] por nivel."""
+    def corner(i, z):
+        t = z / H
+        b = b0 + (b1 - b0) * t
+        a = 2 * math.pi * i / n_legs + (math.pi / 4 if n_legs == 4 else math.pi / 2)
+        return V(math.cos(a) * b * (1.414 if n_legs == 4 else 1.0), math.sin(a) * b * (1.414 if n_legs == 4 else 1.0), z)
+    parts = []
+    for k in range(levels):
+        z0, z1 = H * k / levels, H * (k + 1) / levels
+        pcs = [beam(corner(i, z0), corner(i, z1), leg_w, mat=mat, cls="metal", grain=None, frac=False) for i in range(n_legs)]
+        for i in range(n_legs):
+            j = (i + 1) % n_legs
+            pcs.append(strut(corner(i, z0), corner(j, z1), strut_r, mat, 4, cls="metal", frac=False, smooth=False))
+            pcs.append(strut(corner(j, z0), corner(i, z1), strut_r, mat, 4, cls="metal", frac=False, smooth=False))
+            pcs.append(strut(corner(i, z1), corner(j, z1), strut_r, mat, 4, cls="metal", frac=False, smooth=False))
+        parts.append(Part(f"Level_{k}", pcs, "metal"))
+    return parts, corner
+
+
+def build_pylon(name):
+    """Torre de alta tension (celosia) 30 m con 3 crucetas y cadenas de aisladores."""
+    H = 30.0
+    parts, corner = lattice_tower(H, 3.6, 0.9, 8)
+    for k, (z, half) in enumerate(((H * 0.68, 6.0), (H * 0.8, 4.8), (H * 0.92, 3.6))):
+        arm = [beam((-half, 0, z), (half, 0, z), 0.35, 0.5, mat="Mat_Steel_Galvanized", cls="metal", grain=None, frac=False)]
+        for sx in (-1, 1):
+            arm.append(strut((sx * half * 0.95, 0, z), (sx * half * 0.95, 0, z - 2.2), 0.08, "Mat_Insulator", 8, cls="glass", frac=False))
+            arm.append(strut((sx * 1.0, 0, z - 0.6), (sx * half * 0.7, 0, z), 0.05, "Mat_Steel_Galvanized", 4, cls="metal", frac=False))
+        parts.append(Part(f"Crossarm_{k}", arm, "metal"))
+    parts.append(Part("Footings", [box((1.2, 1.2, 0.5), tuple(corner(i, 0) + V(0, 0, 0.0)), mat="Mat_Concrete_Base", cls="concrete") for i in range(4)],
+                      "concrete"))
+    return Asset(name, "Map", "structure", parts, n_impacts=1, dmg_r=3.0, ruin_h=0.25, spread=0.6, rubble_cell=5.0,
+                 debris="metal", lod=(1.0, 0.6), ref="Torre de alta tension de celosia ~30 m (110-220 kV)")
+
+
+def build_radio_mast(name):
+    """Mastil de comunicaciones atirantado 40 m (seccion triangular) con antenas y vientos."""
+    H = 40.0
+    parts, corner = lattice_tower(H, 0.9, 0.9, 10, n_legs=3, leg_w=0.12, strut_r=0.025)
+    ant = [cyl(0.25, 1.6, (0.9 * math.cos(a), 0.9 * math.sin(a), H - 2.0), mat="Mat_Civil_White", segs=8, cls="metal", frac=False)
+           for a in (0.3, 2.4, 4.5)]
+    ant += [box((0.3, 1.2, 2.2), (1.2, 0, H - 6.0), mat="Mat_Civil_White", cls="metal", frac=False),
+            cyl(0.6, 0.3, (0, -1.3, H - 9.0), (90, 0, 0), mat="Mat_Civil_White", segs=12, cls="metal", frac=False)]
+    parts.append(Part("Antennas", ant, "metal", kind="detail"))
+    guys = []
+    for i in range(3):
+        a = 2 * math.pi * i / 3 + math.pi / 2
+        anchor = V(math.cos(a) * 24.0, math.sin(a) * 24.0, 0.2)
+        for z in (H * 0.45, H * 0.9):
+            guys.append(strut(anchor, corner(i, z), 0.015, "Mat_Wire_Steel", 3, cls="metal", frac=False, smooth=False))
+        guys.append(box((1.0, 1.0, 0.4), tuple(anchor), mat="Mat_Concrete_Base", cls="concrete", frac=False))
+    parts.append(Part("GuyWires", guys, "metal", kind="detail"))
+    parts.append(Part("Equipment_Shelter", [box((3.0, 2.4, 2.6), (4.0, 3.0, 1.3), mat="Mat_Civil_White", cls="metal")], "metal"))
+    return Asset(name, "Map", "structure", parts, n_impacts=1, dmg_r=3.0, ruin_h=0.2, spread=0.6, rubble_cell=6.0,
+                 debris="metal", lod=(1.0, 0.6), ref="Mastil de telecomunicaciones atirantado 40 m")
+
+
+def build_water_tower(name):
+    """Deposito de agua elevado: 4 columnas de 12 m + tanque de 6 m de diametro."""
+    parts, H, R = [], 12.0, 3.0
+    for i, (sx, sy) in enumerate(((1, 1), (1, -1), (-1, 1), (-1, -1))):
+        parts.append(Part(f"Column_{i}", [beam((sx * 2.4, sy * 2.4, 0), (sx * 2.0, sy * 2.0, H), 0.35, mat="Mat_Concrete_Base", cls="concrete")], "concrete"))
+    br = []
+    for z in (4.0, 8.0):
+        for (a, b) in (((2.2, 2.2), (2.2, -2.2)), ((2.2, -2.2), (-2.2, -2.2)), ((-2.2, -2.2), (-2.2, 2.2)), ((-2.2, 2.2), (2.2, 2.2))):
+            br.append(beam((a[0], a[1], z), (b[0], b[1], z), 0.25, mat="Mat_Concrete_Base", cls="concrete"))
+    parts.append(Part("Bracing", br, "concrete"))
+    tank = lathe([(0, 0), (R, 0), (R, 4.0), (0, 4.0), (0, 3.8), (R - 0.12, 3.8), (R - 0.12, 0.12), (0, 0.12)], (0, 0, H), mat="Mat_Steel_Galvanized",
+                 segs=20, hollow=True, cls="metal")
+    roof = cyl(R + 0.15, 1.2, (0, 0, H + 4.6), mat="Mat_Steel_Galvanized", segs=20, r2=0.3, cls="metal")
+    parts.append(Part("Tank", [tank, box((5.2, 5.2, 0.3), (0, 0, H - 0.15), mat="Mat_Concrete_Base", cls="concrete")], "metal"))
+    parts.append(Part("Roof", [roof], "metal"))
+    lad = [strut((2.6, -0.25, 0.0), (2.2, -0.25, H), 0.03, "Mat_Steel_Galvanized", 4, cls="metal", frac=False),
+           strut((2.6, 0.25, 0.0), (2.2, 0.25, H), 0.03, "Mat_Steel_Galvanized", 4, cls="metal", frac=False)]
+    parts.append(Part("Ladder", lad, "metal", kind="detail"))
+    return Asset(name, "Map", "structure", parts, n_impacts=2, dmg_r=2.0, ruin_h=0.3, spread=0.5, rubble_cell=4.0,
+                 debris="concrete", lod=(1.0, 0.6), ref="Deposito elevado ~110 m3 sobre columnas de 12 m")
+
+
+def build_fuel_tank(name):
+    """Tanque de almacenamiento de combustible 16 m x 10 m con cubeto de contencion."""
+    R, H = 8.0, 10.0
+    shell = lathe([(0, 0), (R, 0), (R, H), (0, H), (0, H - 0.1), (R - 0.05, H - 0.1), (R - 0.05, 0.1), (0, 0.1)], mat="Mat_Civil_White",
+                  segs=28, hollow=True, cls="metal")
+    roof = cyl(R + 0.1, 1.0, (0, 0, H + 0.5), mat="Mat_Civil_White", segs=28, r2=0.8, cls="metal")
+    parts = [Part("Shell", [shell], "metal"), Part("Roof", [roof], "metal")]
+    st = []
+    for k in range(20):
+        a = math.radians(k * 9)
+        st.append(box((1.0, 0.3, 0.06), (math.cos(a) * (R + 0.6), math.sin(a) * (R + 0.6), 0.5 * (k + 1)), (0, 0, math.degrees(a) + 90),
+                      mat="Mat_Steel_Galvanized", cls="metal", frac=False))
+    parts.append(Part("Stairs", st, "metal", kind="detail"))
+    bund = []
+    for k in range(16):
+        a0, a1 = 2 * math.pi * k / 16, 2 * math.pi * (k + 1) / 16
+        p0 = V(math.cos(a0), math.sin(a0), 0) * (R + 4.5)
+        p1 = V(math.cos(a1), math.sin(a1), 0) * (R + 4.5)
+        bund.append(beam(p0 + V(0, 0, 0.6), p1 + V(0, 0, 0.6), 0.3, 1.2, mat="Mat_Concrete_Base", cls="concrete", grain=None))
+    parts.append(Part("Bund_Wall", bund, "concrete"))
+    return Asset(name, "Map", "structure", parts, n_impacts=2, dmg_r=3.0, ruin_h=0.3, spread=0.4, rubble_cell=5.0,
+                 debris="metal", lod=(1.0, 0.6), ref="Tanque API 650 de ~2000 m3 (16 m x 10 m) con cubeto")
+
+
+def build_bridge(name):
+    """Puente de vigas de hormigon 36 m (3 vanos de 12 m), tablero a 6 m: si cae una pila, cae el vano."""
+    Hd, W, span = 6.0, 9.0, 12.0
+    parts = []
+    for k in range(3):
+        x = -span + k * span
+        deck = [box((span - 0.05, W, 0.45), (x, 0, Hd + 0.225), mat="Mat_Concrete_Base", cls="concrete"),
+                box((span - 0.05, W - 2.0, 0.08), (x, 0, Hd + 0.49), mat="Mat_Asphalt", cls="concrete", frac=False)]
+        deck += [box((span - 0.05, 0.5, 1.1), (x, gy, Hd - 0.55), mat="Mat_Concrete_Base", cls="concrete") for gy in (-3.0, 0.0, 3.0)]
+        parts.append(Part(f"Span_{k}", deck, "concrete"))
+        rail = [box((span - 0.05, 0.3, 0.9), (x, sy * (W / 2 - 0.15), Hd + 0.9), mat="Mat_Concrete_Base", cls="concrete") for sy in (-1, 1)]
+        parts.append(Part(f"Parapet_{k}", rail, "concrete"))
+    seat = Hd - 1.1                                              # cota de apoyo de las vigas
+    for k, sx in enumerate((-1, 1)):                             # estribos: asiento de 1 m + muro de guarda
+        x = sx * span * 1.5
+        ab = [box((3.0, W + 1.0, seat), (x + sx * 0.5, 0, seat / 2), mat="Mat_Concrete_Base", cls="concrete"),
+              box((0.6, W + 1.0, Hd + 0.45 - seat), (x + sx * 0.3 + sx * 0.05, 0, (seat + Hd + 0.45) / 2), mat="Mat_Concrete_Base", cls="concrete")]
+        parts.append(Part(f"Abutment_{k}", ab, "concrete"))
+    for k, x in enumerate((-span / 2, span / 2)):                # pilas: 2 fustes + dintel bajo las vigas
+        pier = [box((1.6, 1.6, seat - 0.8), (x, gy, (seat - 0.8) / 2), mat="Mat_Concrete_Base", cls="concrete") for gy in (-2.8, 2.8)]
+        pier.append(box((2.0, W, 0.8), (x, 0, seat - 0.4), mat="Mat_Concrete_Base", cls="concrete"))
+        parts.append(Part(f"Pier_{k}", pier, "concrete"))
+    return Asset(name, "Map", "structure", parts, n_impacts=2, dmg_r=2.5, ruin_h=0.45, spread=0.2, rubble_cell=5.0,
+                 debris="concrete", lod=(1.0,), ref="Puente de vigas de hormigon, 3 vanos de 12 m, tablero de 9 m a 6 m de altura")
+
+
+def build_helipad(name):
+    p = [Part("Pad", [box((20.0, 20.0, 0.3), (0, 0, 0.15), mat="Mat_Concrete_Base", cls="concrete")], "concrete")]
+    mk = [box((0.8, 6.0, 0.01), (sx * 1.8, 0, 0.305), mat="Mat_Road_Paint", cls="concrete", frac=False) for sx in (-1, 1)]
+    mk.append(box((2.8, 0.8, 0.01), (0, 0, 0.305), mat="Mat_Road_Paint", cls="concrete", frac=False))
+    mk.append(lathe([(7.0, 0.3), (7.5, 0.3), (7.5, 0.31), (7.0, 0.31)], mat="Mat_Road_Paint", segs=32, closed=True, cls="concrete", frac=False))
+    p.append(Part("Markings", mk, "concrete", kind="detail"))
+    return Asset(name, "Map", "structure", p, n_impacts=1, dmg_r=3.0, ruin_h=1.0, spread=0.1, rubble_cell=5.0,
+                 debris="concrete", lod=(1.0,), ref="Helipuerto de campana 20 x 20 m, H de 6 m")
+
+
+def build_runway(name):
+    """Tramo de pista 60 x 45 m (hormigon 0.4 m) con eje discontinuo y bordes."""
+    L, W = 60.0, 45.0
+    parts = []
+    for k in range(4):                                          # losas independientes (crateres por losa)
+        parts.append(Part(f"Slab_{k}", [box((L, W / 4, 0.4), (0, -W / 2 + W / 8 + k * W / 4, 0.2), mat="Mat_Concrete_Base", cls="concrete")], "concrete"))
+    mk = [box((30.0, 0.9, 0.01), (-L / 2 + 15.0, 0, 0.405), mat="Mat_Road_Paint", cls="concrete", frac=False)]
+    mk += [box((L, 0.9, 0.01), (0, sy * (W / 2 - 1.0), 0.405), mat="Mat_Road_Paint", cls="concrete", frac=False) for sy in (-1, 1)]
+    parts.append(Part("Markings", mk, "concrete", kind="detail"))
+    return Asset(name, "Map", "structure", parts, n_impacts=2, dmg_r=4.0, ruin_h=1.0, spread=0.1, rubble_cell=6.0,
+                 debris="concrete", chunk_scale=0.6, lod=(1.0,), ref="Pista OTAN 45 m de ancho, losas de hormigon de 0.4 m (tramo de 60 m)")
+
+
+def build_street_lamp(name):
+    pole = lathe([(0.12, 0), (0.1, 1.0), (0.06, 8.0), (0, 8.05)], mat="Mat_Steel_Galvanized", segs=8, cls="metal", grain="z")
+    arm = [strut((0, 0, 7.8), (1.6, 0, 8.3), 0.04, "Mat_Steel_Galvanized", 6, cls="metal"),
+           box((0.6, 0.25, 0.12), (1.85, 0, 8.25), mat="Mat_Steel_Galvanized", cls="metal"),
+           box((0.5, 0.2, 0.03), (1.85, 0, 8.18), mat="Mat_Light_Lens", cls="glass", frac=False)]
+    return Asset(name, "Props", "tree", [Part("Pole", [pole], "metal", kind="trunk"), Part("Lamp", arm, "metal", kind="branch")],
+                 cut_h=0.8, lod=(1.0, 0.5), ref="Farola de vial 8 m con brazo de 1.6 m")
+
+
+def build_billboard(name):
+    posts = [beam((sx * 2.5, 0, 0), (sx * 2.5, 0, 6.0), 0.3, mat="Mat_Steel_Galvanized", cls="metal") for sx in (-1, 1)]
+    panel = box((8.0, 0.25, 3.0), (0, 0, 6.5), mat="Mat_Container_Paint", cls="metal")
+    walk = box((8.0, 0.8, 0.06), (0, -0.55, 4.9), mat="Mat_Steel_Galvanized", cls="metal", frac=False)
+    return Asset(name, "Props", "structure", [Part("Posts", posts, "metal"), Part("Panel", [panel, walk], "metal")],
+                 n_impacts=1, dmg_r=1.5, ruin_h=0.4, spread=0.5, rubble_cell=3.0, debris="metal", lod=(1.0,),
+                 ref="Valla publicitaria 8 x 3 m sobre postes de 6 m")
+
+
+# ==================================================================================
+# BUILDERS v4 (2): MAS VEHICULOS, AERONAVES Y ESTRUCTURAS DE GUERRA (medidas reales)
+# ==================================================================================
+MATS.update({
+    "Mat_Sign_Red": ((0.55, 0.04, 0.03), 0.2, 0.5, 1, 0),
+    "Mat_Dome_Tile": ((0.10, 0.32, 0.30), 0.1, 0.35, 1, 0),
+})
+TEX_SPECS.update({
+    "Mat_Sign_Red": ("metal_paint", dict(chips=0.1, dust=0.2), 1.0, 0.4),
+    "Mat_Dome_Tile": ("plaster", dict(cracks=0.3), 2.0, 0.6),
+})
+
+TRUCKS = {
+    "Veh_Truck_Ural-4320": dict(L=7.37, W=2.5, H=2.87, mass=8050, axles=(2.43, -1.09, -2.49), wr=0.6, style="hood", roof=2.6,
+                                paint="Mat_Military_RuGreen", cargo="canvas",
+                                ref="Ural-4320 6x6: L 7.37 m, ancho 2.5 m, alto 2.87 m, batalla 3.525 + 1.4 m, 8 t vacio"),
+    "Art_MLRS_BM-21_Grad": dict(L=7.35, W=2.4, H=3.09, mass=13700, axles=(2.42, -1.1, -2.5), wr=0.6, style="hood", roof=2.38,
+                                paint="Mat_Military_RuGreen", cargo="grad",
+                                ref="BM-21 Grad sobre Ural-375D: L 7.35 m, ancho 2.4 m, alto 3.09 m, 40 tubos de 122 mm, 13.7 t"),
+    "Art_MLRS_M142_HIMARS": dict(L=6.94, W=2.44, H=3.18, mass=16250, axles=(2.35, -1.05, -2.45), wr=0.56, style="cabover", roof=2.95,
+                                 paint="Mat_Military_Desert", cargo="himars", armored=True,
+                                 ref="M142 HIMARS (chasis FMTV 6x6): L 6.94 m, ancho 2.44 m, alto 3.18 m, contenedor de 6 GMLRS, 16.25 t"),
+    "Civ_Truck_Box": dict(L=7.2, W=2.3, H=3.3, mass=5500, axles=(2.55, -1.65), wr=0.46, style="cabover", roof=2.7,
+                          paint="Mat_Civil_White", cargo="box", civil=True,
+                          ref="Camion de reparto 7.5 t con caja: L 7.2 m, ancho 2.3 m, alto 3.3 m, batalla 4.2 m"),
+    "Civ_Bus_City": dict(L=12.0, W=2.55, H=3.05, mass=11500, axles=(3.3, -2.6), wr=0.48, style="bus",
+                         paint="Mat_Bus_Paint", civil=True,
+                         ref="Autobus urbano 12 m: ancho 2.55 m, alto 3.05 m, batalla 5.9 m, 11.5 t vacio"),
+}
+
+
+def _plate(pts, t, mat, cls="metal", **kw):
+    """Placa fina a partir de 4 esquinas (planos de cola, faldones, cristales grandes)."""
+    P = [V(p) for p in pts]
+    n = (P[1] - P[0]).cross(P[3] - P[0]).normalized() * (t / 2)
+    return hull([tuple(p + n) for p in P] + [tuple(p - n) for p in P], mat=mat, cls=cls, **kw)
+
+
+def _move(parts, d):
+    M = Matrix.Translation(V(d))
+    for p in parts:
+        for pc in p.all_pieces():
+            pc.transform(M)
+        if p.pivot is not None:
+            p.pivot = M @ p.pivot
+    return parts
+
+
+def build_truck_x(name):
+    """Camiones de capo (Ural/BM-21), de cabina avanzada (HIMARS, reparto) y autobus. Frente +X."""
+    s = TRUCKS[name]
+    L, W, H, wr, P, st = s["L"], s["W"], s["H"], s["wr"], s["paint"], s["style"]
+    civil = s.get("civil", False)
+    parts, glass, doors, det = [], [], [], []
+    tw = wr * 0.8
+    yw = W / 2 - tw / 2 - 0.02
+    for i, x in enumerate(s["axles"]):
+        for side, sy in (("L", 1), ("R", -1)):
+            parts.append(tire_wheel(x, sy * yw, wr, wr, tw, f"Wheel_{i}{side}", "Mat_Metal_Gunmetal" if civil else P))
+    zb = wr * 0.85
+    xf = L / 2
+    if st == "bus":
+        zf = 0.32                                            # piso bajo
+        body = hull(sym([(xf, W / 2 - 0.08, zf), (xf, W / 2 - 0.1, H - 0.35), (xf - 0.35, W / 2 - 0.04, H), (-xf + 0.2, W / 2 - 0.04, H),
+                         (-xf, W / 2 - 0.06, H - 0.3), (-xf, W / 2 - 0.06, zf), (xf - 0.1, W / 2 - 0.04, zf), (-xf + 0.1, W / 2 - 0.04, zf)]),
+                    mat=P, cls="metal")
+        parts.append(Part("Body", [body], "metal", kind="hull"))
+        door_x = [(xf - 0.95, 1.2), (0.0, 1.3)]               # puertas del lado derecho (-Y): delantera y central
+        zw0, zw1 = 1.15, H - 0.32
+        n = 8
+        x0w, x1w = xf - 0.4, -xf + 0.5
+        for sy in (-1, 1):
+            for k in range(n):
+                a = x0w + (x1w - x0w) * k / n - 0.04
+                b = x0w + (x1w - x0w) * (k + 1) / n + 0.04
+                if sy < 0 and any(min(a, b) < dx + dw / 2 and max(a, b) > dx - dw / 2 for dx, dw in door_x):
+                    continue
+                glass.append(glass_panel((a, sy * (W / 2 - 0.02), zw0), (b, sy * (W / 2 - 0.02), zw0),
+                                         (b, sy * (W / 2 - 0.035), zw1), (a, sy * (W / 2 - 0.035), zw1)))
+        glass.append(glass_panel((xf + 0.012, -W / 2 + 0.15, 0.95), (xf + 0.012, W / 2 - 0.15, 0.95),
+                                 (xf + 0.012, W / 2 - 0.15, H - 0.42), (xf + 0.012, -W / 2 + 0.15, H - 0.42)))
+        glass.append(glass_panel((-xf - 0.012, -W / 2 + 0.25, 1.45), (-xf - 0.012, W / 2 - 0.25, 1.45),
+                                 (-xf - 0.012, W / 2 - 0.25, H - 0.45), (-xf - 0.012, -W / 2 + 0.25, H - 0.45)))
+        for k, (dx, dw) in enumerate(door_x):
+            leaf = [box((dw, 0.05, H - 0.62 - zf), (dx, -(W / 2 - 0.01), zf + (H - 0.62 - zf) / 2), mat=P, cls="metal"),
+                    glass_panel((dx - dw / 2 + 0.1, -W / 2 - 0.02, 0.9), (dx + dw / 2 - 0.1, -W / 2 - 0.02, 0.9),
+                                (dx + dw / 2 - 0.1, -W / 2 - 0.02, H - 0.75), (dx - dw / 2 + 0.1, -W / 2 - 0.02, H - 0.75))]
+            doors.append(Part(f"Door_{k}", leaf, "metal", kind="door", pivot=(dx, -W / 2, zf), axis=(1, 0, 0), joint="slide"))
+        det += [box((2.2, 1.6, 0.3), (-1.0, 0, H + 0.15), mat="Mat_Civil_White", cls="metal"),          # climatizador
+                box((0.06, 1.6, 0.25), (xf + 0.01, 0, H - 0.25), mat="Mat_Light_Lens", cls="glass", frac=False),
+                box((0.3, W * 0.98, 0.35), (xf + 0.08, 0, zf + 0.2), mat="Mat_Metal_Gunmetal", cls="metal"),
+                box((0.3, W * 0.98, 0.35), (-xf - 0.08, 0, zf + 0.2), mat="Mat_Metal_Gunmetal", cls="metal")]
+        for sy in (-1, 1):
+            det.append(box((0.05, 0.3, 0.15), (xf + 0.01, sy * (W / 2 - 0.3), 0.75), mat="Mat_Light_Lens", cls="glass", frac=False))
+            det.append(strut((xf - 0.1, sy * (W / 2 - 0.05), H - 0.5), (xf + 0.25, sy * (W / 2 + 0.2), H - 0.7), 0.02, "Mat_Metal_Gunmetal", 4, cls="metal"))
+    else:
+        roof = s["roof"]
+        parts.append(Part("Chassis", [box((L * 0.92, W * 0.42, 0.25), (-0.12, 0, zb), mat="Mat_Metal_Gunmetal", cls="metal")], "metal", kind="body"))
+        if st == "hood":
+            hood_l, cab_l, hz = 1.7, 1.5, 1.95
+            xc0 = xf - hood_l
+            xc1 = xc0 - cab_l
+            hood = hull(sym([(xf, W / 2 - 0.62, zb + 0.3), (xf, W / 2 - 0.62, hz - 0.08), (xf - 0.25, W / 2 - 0.58, hz),
+                             (xc0, W / 2 - 0.5, hz + 0.02), (xc0, W / 2 - 0.5, zb + 0.25)]), mat=P, cls="metal")
+            fend = []
+            for sy in (-1, 1):
+                fx = s["axles"][0]
+                fend.append(box((1.5, 0.58, 0.06), (fx, sy * (W / 2 - 0.29), 2 * wr + 0.12), mat=P, cls="metal"))
+                fend.append(box((0.06, 0.58, 0.45), (fx - 0.78, sy * (W / 2 - 0.29), 2 * wr - 0.1), mat=P, cls="metal"))
+            parts.append(Part("Body_Hood", [hood] + fend, "metal", kind="body"))
+            cab = hull(sym([(xc0, W / 2 - 0.1, zb + 0.3), (xc0, W / 2 - 0.1, hz + 0.1), (xc0 - 0.25, W / 2 - 0.13, roof),
+                            (xc1, W / 2 - 0.13, roof), (xc1, W / 2 - 0.1, zb + 0.3)]), mat=P, cls="metal")
+            parts.append(Part("Cab", [cab], "metal", kind="cab"))
+
+            def fxw(z):
+                return xc0 - 0.25 * (z - (hz + 0.1)) / max(roof - hz - 0.1, 1e-3) + 0.015
+            z0g, z1g = hz + 0.15, roof - 0.1
+            for sy in (-1, 1):
+                glass.append(glass_panel((fxw(z0g), sy * 0.06, z0g), (fxw(z0g), sy * (W / 2 - 0.2), z0g),
+                                         (fxw(z1g), sy * (W / 2 - 0.22), z1g), (fxw(z1g), sy * 0.06, z1g)))
+            dx0, dx1 = xc0 - 0.2, xc1 + 0.15
+        else:                                                    # cabina avanzada (FMTV/HIMARS, reparto)
+            cab_l = 2.05 if s.get("armored") else 1.75
+            xc1 = xf - cab_l
+            cab = hull(sym([(xf, W / 2 - 0.08, zb + 0.15), (xf - 0.12, W / 2 - 0.1, roof - 0.1), (xf - 0.35, W / 2 - 0.12, roof),
+                            (xc1, W / 2 - 0.08, roof), (xc1, W / 2 - 0.05, zb + 0.15)]), mat=P, cls="metal")
+            parts.append(Part("Cab", [cab], "metal", kind="cab"))
+
+            def fxw(z):
+                return xf - 0.12 * (z - (zb + 0.15)) / max(roof - 0.1 - zb - 0.15, 1e-3) + 0.015
+            z0g, z1g = zb + (1.25 if s.get("armored") else 1.0), roof - 0.22
+            ww = W / 2 - (0.35 if s.get("armored") else 0.18)
+            glass.append(glass_panel((fxw(z0g), -ww, z0g), (fxw(z0g), ww, z0g), (fxw(z1g), ww, z1g), (fxw(z1g), -ww, z1g)))
+            det.append(box((0.25, W * 0.96, 0.3), (xf + 0.08, 0, zb + 0.05), mat="Mat_Metal_Gunmetal", cls="metal"))
+            dx0, dx1 = xf - 0.3, xc1 + 0.25
+        for k, sy in enumerate((1, -1)):                         # puertas con ventanilla
+            dl = dx0 - dx1
+            leaf = [box((dl, 0.06, roof - zb - 0.55), ((dx0 + dx1) / 2, sy * (W / 2 - 0.06), (roof + zb) / 2 - 0.1), mat=P, cls="metal"),
+                    glass_panel((dx0 - 0.1, sy * (W / 2 - 0.02), roof - 1.05), (dx1 + 0.1, sy * (W / 2 - 0.02), roof - 1.05),
+                                (dx1 + 0.1, sy * (W / 2 - 0.05), roof - 0.25), (dx0 - 0.1, sy * (W / 2 - 0.05), roof - 0.25))]
+            doors.append(Part(f"Door_{k}", leaf, "metal", kind="door", pivot=(dx0, sy * W / 2, zb + 0.5), axis=(0, 0, 1), joint="hinge"))
+            det.append(box((0.04, 0.22, 0.32), (dx0 + 0.1, sy * (W / 2 + 0.22), roof - 0.55), mat="Mat_Metal_Gunmetal", cls="metal"))
+            det.append(strut((dx0 + 0.02, sy * (W / 2 - 0.08), roof - 0.4), (dx0 + 0.1, sy * (W / 2 + 0.12), roof - 0.5), 0.015,
+                             "Mat_Metal_Gunmetal", 4, cls="metal", frac=False))
+            det.append(box((0.05, 0.22, 0.14), (xf + 0.02, sy * (W / 2 - 0.3), zb + 0.55), mat="Mat_Light_Lens", cls="glass", frac=False))
+            det.append(cyl(0.25, 0.9, (s["axles"][1] + 1.2, sy * (W / 2 - 0.32), zb + 0.05), (0, 90, 0), mat=P, segs=10, cls="metal"))
+        deck_z = zb + 0.55
+        cargo = s["cargo"]
+        xd0, xd1 = xc1 - (0.7 if cargo == "canvas" else 0.15), -L / 2
+        if cargo in ("canvas", "box", "himars", "grad"):
+            deck = [box((xd0 - xd1, W - 0.06, 0.18), ((xd0 + xd1) / 2, 0, deck_z - 0.09), mat="Mat_Metal_Gunmetal" if civil else P, cls="metal")]
+            parts.append(Part("RearDeck", deck, "metal", kind="bed"))
+        if cargo == "canvas":
+            bx, bl = (xd0 + xd1) / 2, xd0 - xd1
+            bed = [box((bl, 0.05, 0.75), (bx, sy * (W / 2 - 0.025), deck_z + 0.375), mat="Mat_Wood_Plank", cls="wood", grain="x") for sy in (-1, 1)]
+            bed += [box((0.05, W, 0.75), (xd1 + 0.025, 0, deck_z + 0.375), mat="Mat_Wood_Plank", cls="wood", grain="y"),
+                    box((0.05, W, 0.9), (xd0 - 0.025, 0, deck_z + 0.45), mat="Mat_Wood_Plank", cls="wood", grain="y")]
+            parts.append(Part("CargoBed", bed, "wood", kind="bed"))
+            ch = H - deck_z - 0.75
+            cover = [box((bl / 4 + 0.02, W - 0.04, 0.03), (xd1 + bl * (k + 0.5) / 4, 0, H - 0.015), mat="Mat_Fabric_Canvas", cls="fabric") for k in range(4)]
+            cover += [box((bl - 0.1, 0.03, ch), (bx, sy * (W / 2 - 0.04), H - ch / 2), mat="Mat_Fabric_Canvas", cls="fabric") for sy in (-1, 1)]
+            cover.append(box((0.03, W - 0.04, ch), (xd1 + 0.04, 0, H - ch / 2), mat="Mat_Fabric_Canvas", cls="fabric"))
+            parts.append(Part("CanvasCover", cover, "fabric", kind="detail"))
+            spare = tire_wheel(0, 0, 0, wr, tw, "SpareWheel", P)          # de canto tras la cabina, mirando atras
+            M = Matrix.Translation((xc1 - 0.33, 0, zb + 0.15 + wr)) @ Matrix.Rotation(math.pi / 2, 4, 'Z')
+            for pc in spare.all_pieces():
+                pc.transform(M)
+            spare.pivot, spare.axis = M @ spare.pivot, (M.to_3x3() @ spare.axis).normalized()
+            spare.kind, spare.joint, spare.tags = "detail", "fixed", {"detail", "tire"}
+            parts.append(spare)
+        elif cargo == "box":
+            bl, bx = xd0 - xd1 - 0.05, (xd0 + xd1) / 2
+            hb = H - deck_z
+            shell = [box((bl, 0.04, hb), (bx, sy * (W / 2 - 0.02), deck_z + hb / 2), mat="Mat_Civil_White", cls="metal") for sy in (-1, 1)]
+            shell += [box((bl, W, 0.04), (bx, 0, H - 0.02), mat="Mat_Civil_White", cls="metal"),
+                      box((0.04, W, hb), (xd0 - 0.02, 0, deck_z + hb / 2), mat="Mat_Civil_White", cls="metal")]
+            parts.append(Part("CargoBox", shell, "metal", kind="bed"))
+            doors.append(Part("RollerDoor", [box((0.05, W - 0.1, hb - 0.1), (xd1 - 0.02, 0, deck_z + hb / 2), mat="Mat_Roof_Metal", cls="metal")],
+                              "metal", kind="door", pivot=(xd1, 0, H - 0.1), axis=(0, 0, 1), joint="slide"))
+        elif cargo == "himars":
+            px = (xd0 + xd1) / 2
+            base = [cyl(0.95, 0.3, (px, 0, deck_z + 0.15), mat=P, segs=16, cls="metal"),
+                    box((3.0, 2.1, 0.35), (px, 0, deck_z + 0.47), mat=P, cls="metal")]
+            base += [box((1.0, 0.15, 0.8), (px + 1.1, sy * 0.7, deck_z + 1.05), mat=P, cls="metal") for sy in (-1, 1)]
+            parts.append(Part("Launcher_Turntable", base, "metal", kind="turret", pivot=(px, 0, deck_z), axis=(0, 0, 1), joint="yaw"))
+            pz = deck_z + 1.55
+            pod = [box((4.3, 1.2, 1.05), (px - 0.4, 0, pz), mat=P, cls="metal")]
+            for r in range(2):
+                for c in range(3):
+                    pod.append(cyl(0.135, 0.06, (px - 2.56, (c - 1) * 0.36, pz - 0.23 + r * 0.46), (0, 90, 0),
+                                   mat="Mat_Metal_Charred", segs=10, cls="metal", frac=False))
+            parts.append(Part("Launcher_Pod", pod, "metal", kind="gun", tags=("turret",), pivot=(px + 1.75, 0, pz - 0.5), axis=(0, 1, 0), joint="pitch"))
+        elif cargo == "grad":
+            lx = -L / 2 + 1.3
+            base = [cyl(0.7, 0.35, (lx, 0, deck_z + 0.175), mat=P, segs=14, cls="metal"),
+                    box((1.1, 1.4, 0.45), (lx + 0.1, 0, deck_z + 0.58), mat=P, cls="metal")]
+            parts.append(Part("Launcher_Mount", base, "metal", kind="turret", pivot=(lx, 0, deck_z), axis=(0, 0, 1), joint="yaw"))
+            tz0, sp = roof + 0.13, 0.155
+            tubes = []
+            for r in range(4):
+                for c in range(10):
+                    tubes.append(cyl(0.07, 3.0, (lx + 0.95, (c - 4.5) * sp, tz0 + r * sp), (0, 90, 0), mat="Mat_Military_RuGreen",
+                                     segs=8, cls="metal", frac=False))
+            tubes += [box((0.12, 10 * sp + 0.1, 4 * sp + 0.1), (lx + 0.95 + dx, 0, tz0 + 1.5 * sp), mat=P, cls="metal") for dx in (-1.2, 0.0, 1.2)]
+            tubes.append(box((0.5, 0.5, tz0 - deck_z - 0.7), (lx + 0.1, 0, (tz0 + deck_z + 0.7) / 2), mat=P, cls="metal"))
+            parts.append(Part("Launcher_Tubes", tubes, "metal", kind="gun", tags=("turret",), pivot=(lx + 0.1, 0, tz0), axis=(0, 1, 0), joint="pitch"))
+        det.append(strut((xc1 + 0.15, -W / 2 + 0.25, roof - 0.3), (xc1 + 0.15, -W / 2 + 0.25, roof + 0.5), 0.05, "Mat_Metal_Gunmetal", 6, cls="metal"))
+    parts.append(Part("Details", det, "metal", kind="detail"))
+    if glass:
+        parts.append(Part("Windows", glass, "glass", kind="glass"))
+    parts += doors
+    cat = "Artillery" if name.startswith("Art_") else "Civilian" if civil else "Vehicles"
+    return Asset(name, cat, "vehicle", parts, forward_x=True, mass=s["mass"], ref=s["ref"], lod=(1.0, 0.5, 0.2))
+
+
+HELIS.update({
+    "Air_Heli_Mi-24P_Hind": dict(FL=17.5, FW=1.7, FH=2.0, rotor=17.3, blades=5, trotor=3.9, H=4.65, mass=8500, tandem=True, stubs=6.5,
+                                 k=17.5 / 15.0, paint="Mat_Military_RuGreen",
+                                 ref="Mil Mi-24P: fuselaje 17.5 m, rotor 17.3 m (5 palas), alas 6.5 m, cabina en tandem, 8.5 t vacio"),
+    "Air_Heli_Mi-8MTV": dict(FL=18.4, FW=2.5, FH=2.3, rotor=21.29, blades=5, trotor=3.91, H=4.75, mass=7489, k=18.4 / 15.0,
+                             paint="Mat_Military_RuGreen", ref="Mil Mi-8MTV: L 18.42 m (sin rotores), rotor 21.29 m, alto 4.76 m, 7.5 t vacio"),
+})
+
+
+def build_tb2(name):
+    """Bayraktar TB2: L 6.5 m, envergadura 12 m, doble viga de cola con V invertida, helice propulsora."""
+    P, gz = "Mat_Military_Grey", 0.62
+    zc = gz + 0.32
+    secs = [(3.25, 0.04, 0.04, zc), (2.95, 0.2, 0.22, zc), (2.2, 0.3, 0.32, zc + 0.02), (0.2, 0.3, 0.3, zc + 0.02),
+            (-0.9, 0.2, 0.2, zc + 0.05), (-1.3, 0.1, 0.1, zc + 0.05)]
+    parts = [Part("Fuselage", [loft(ell_rings(secs, 10), mat=P, cls="metal", smooth=True),
+                               sphere(0.17, (2.45, 0, gz + 0.02), mat="Mat_Glass_Canopy", segs=10, rings=6, cls="glass")], "metal", kind="fuselage")]
+    wz = zc + 0.3
+    for side, sy in (("L", 1), ("R", -1)):
+        w = prism([(0.75, 0.0), (0.15, 0.0), (0.32, 6.0), (0.6, 6.0)], 0.09, axis='z', offset=wz, mat=P, cls="metal")
+        w.transform(Matrix.Diagonal((1, sy, 1, 1)))
+        parts.append(Part(f"Wing_{side}", [w], "metal", kind="wing", pivot=(0.45, sy * 0.25, wz), axis=(1, 0, 0), joint="break"))
+    tail = [strut((0.4, sy * 1.2, wz), (-3.25, sy * 1.2, wz + 0.04), 0.06, P, 8, cls="metal") for sy in (-1, 1)]
+    for sy in (-1, 1):                                    # V invertida: de cada viga hacia abajo y al centro
+        tail.append(_plate([(-2.75, sy * 1.2, wz + 0.04), (-3.35, sy * 1.2, wz + 0.04), (-3.4, 0.0, wz - 0.62), (-2.95, 0.0, wz - 0.62)],
+                           0.05, P))
+    parts.append(Part("TailBooms", tail, "metal", kind="tail", pivot=(0.4, 0, wz), axis=(0, 1, 0), joint="break"))
+    prop = [cyl(0.08, 0.2, (-1.42, 0, zc + 0.05), (0, 90, 0), mat="Mat_Metal_Gunmetal", segs=8, cls="metal")]
+    for a in (0, 180):
+        prop.append(beam((-1.47, 0, zc + 0.05), (-1.47, 0.85 * math.cos(math.radians(a)), zc + 0.05 + 0.85 * math.sin(math.radians(a))),
+                         0.12, 0.025, mat="Mat_Rotor_Blade", cls="metal", grain=None))
+    parts.append(Part("Propeller", prop, "metal", kind="rotor", pivot=(-1.45, 0, zc + 0.05), axis=(1, 0, 0), joint="spin"))
+    gear = [strut((2.2, 0, zc - 0.25), (2.25, 0, 0.17), 0.025, "Mat_Metal_Gunmetal", 6, cls="metal"),
+            cyl(0.15, 0.08, (2.25, 0, 0.15), (90, 0, 0), mat="Mat_Rubber_Tire", segs=10, cls="rubber")]
+    for sy in (-1, 1):
+        gear.append(strut((0.1, sy * 0.25, zc - 0.25), (-0.05, sy * 0.85, 0.17), 0.025, "Mat_Metal_Gunmetal", 6, cls="metal"))
+        gear.append(cyl(0.16, 0.09, (-0.05, sy * 0.88, 0.16), (90, 0, 0), mat="Mat_Rubber_Tire", segs=10, cls="rubber"))
+    parts.append(Part("LandingGear", gear, "metal", kind="gear"))
+    pyl = []
+    for sy in (-1, 1):                                    # 2 municiones MAM-L bajo cada ala
+        for k, yy in enumerate((1.6, 2.6)):
+            pyl.append(box((0.3, 0.06, 0.12), (0.45, sy * yy, wz - 0.1), mat=P, cls="metal", frac=False))
+            pyl.append(cyl(0.05, 1.0, (0.45, sy * yy, wz - 0.22), (0, 90, 0), mat="Mat_Metal_Gunmetal", segs=8, cls="metal", frac=False))
+    parts.append(Part("Munitions", pyl, "metal", kind="detail"))
+    return Asset(name, "Aircraft", "vehicle", parts, forward_x=True, mass=650,
+                 ref="Baykar Bayraktar TB2: L 6.5 m, envergadura 12 m, MTOW 650 kg, 4 MAM-L", lod=(1.0, 0.5, 0.2))
+
+
+# ----------------------------------- edificios ----------------------------------------
+def _gable(Wx, Dy, z, pitch, t, wall_mat, wcls, roof_mat="Mat_Roof_Tile", rcls="wood", ov=0.45, tag=""):
+    """Cubierta a dos aguas (cumbrera en X) + hastiales, como en build_house."""
+    p = math.radians(pitch)
+    rise = (Dy / 2) * math.tan(p)
+    out = []
+    for sy in (-1, 1):
+        run = Dy / 2 + ov
+        zc = z + rise - (run / 2) * math.tan(p) + 0.09 / math.cos(p)
+        slab = box((Wx + 2 * ov, run / math.cos(p) + 0.05, 0.18), (0, sy * run / 2, zc + 0.03), (sy * -pitch, 0, 0), mat=roof_mat, cls=rcls)
+        out.append(Part(f"Roof{tag}_{'S' if sy < 0 else 'N'}", [slab], rcls))
+    for sx in (-1, 1):
+        g = prism([(-Dy / 2, 0), (Dy / 2, 0), (0, rise)], t, axis='x', offset=sx * (Wx / 2 - t / 2), mat=wall_mat, cls=wcls)
+        g.transform(Matrix.Translation((0, 0, z)))
+        out.append(Part(f"Gable{tag}_{'W' if sx < 0 else 'E'}", [g], wcls))
+    return out, rise
+
+
+def _box_runs(cx, cy, Lx, Ly, t):
+    """Muros perimetrales sin solapes: S/N cubren todo el largo, W/E van entre ellos."""
+    x0, x1, y0, y1 = cx - Lx / 2, cx + Lx / 2, cy - Ly / 2, cy + Ly / 2
+    return {"S": ((x0, y0 + t / 2), (x1, y0 + t / 2)), "N": ((x1, y1 - t / 2), (x0, y1 - t / 2)),
+            "W": ((x0 + t / 2, y1 - t), (x0 + t / 2, y0 + t)), "E": ((x1 - t / 2, y0 + t), (x1 - t / 2, y1 - t))}
+
+
+def _run_len(ab):
+    return (V(ab[1]) - V(ab[0])).length
+
+
+def build_church(name):
+    """Iglesia de mamposteria revocada: nave 20 x 11 m (muros 0.6 m, 9 m) + campanario 4.6 m de lado, 24 m + aguja."""
+    parts, t, unit = [], 0.6, (1.0, 0.5)
+    Ln, Wn, Hn, z0 = 20.0, 11.0, 9.0, 0.2
+    parts.append(Part("Floor", [box((Ln + 0.2, Wn + 0.2, z0), (0, 0, z0 / 2), mat="Mat_Concrete_Base", cls="concrete")], "concrete"))
+    for side, ab in _box_runs(0, 0, Ln, Wn, t).items():
+        L = _run_len(ab)
+        if side in "SN":
+            ops = [(uc, 1.3, 3.2, 4.2) for uc in ((6.5, 10.5, 14.5, 18.0) if side == "S" else (2.0, 5.5, 9.5, 13.5))]
+        elif side == "W":
+            ops = [(L / 2, 2.0, 0.0, 3.6), (L / 2 - 2.8, 1.0, 3.6, 2.8), (L / 2 + 2.8, 1.0, 3.6, 2.8)]
+        else:
+            ops = [(L / 2 - 2.2, 1.2, 3.2, 4.0), (L / 2 + 2.2, 1.2, 3.2, 4.0)]
+        parts.append(Part(f"Nave_Wall_{side}", wall_run(ab[0], ab[1], z0, Hn, t, ops, "Mat_Plaster_Wall", "brick", unit), "brick"))
+        for k, (uc, w, sill, hh) in enumerate(ops):
+            if sill > 0:
+                parts.append(window_part(f"Win_{side}{k}", ab[0], ab[1], z0, t, uc, w, sill, hh))
+            else:
+                parts.append(door_part(f"Door_{side}_L", ab[0], ab[1], z0, uc - w / 4, w / 2, hh))
+                parts.append(door_part(f"Door_{side}_R", ab[0], ab[1], z0, uc + w / 4, w / 2, hh))
+    roof, rise = _gable(Ln, Wn, z0 + Hn, 40, t, "Mat_Plaster_Wall", "brick", ov=0.4)
+    parts += roof
+    # campanario adosado al muro sur, junto a la fachada
+    S, lv, tx, ty = 4.6, 4.8, -Ln / 2 + 2.3, -Wn / 2 - 2.3
+    for k in range(5):
+        z = z0 + k * lv
+        pcs = []
+        for side, ab in _box_runs(tx, ty, S, S, t).items():
+            L = _run_len(ab)
+            if k == 0:
+                ops = [(L / 2, 1.4, 0.0, 2.6)] if side == "W" else []
+            elif k == 4:
+                ops = [(L / 2, 1.5, 1.0, 2.8)]
+            else:
+                ops = [(L / 2, 0.5, 1.8, 1.4)] if side != "N" else []
+            pcs += wall_run(ab[0], ab[1], z, lv, t, ops, "Mat_Plaster_Wall", "brick", unit)
+            if k == 0 and side == "W":
+                parts.append(door_part("Tower_Door", ab[0], ab[1], z, L / 2, 1.4, 2.6))
+        parts.append(Part(f"Tower_L{k}", pcs, "brick"))
+    zt = z0 + 5 * lv
+    parts.append(Part("Belfry_Floor", [box((S - 2 * t, S - 2 * t, 0.2), (tx, ty, z0 + 4 * lv + 0.1), mat="Mat_Floor_Wood", cls="wood", grain="x")], "wood"))
+    bell = lathe([(0, 1.0), (0.18, 0.98), (0.3, 0.8), (0.33, 0.4), (0.45, 0.05), (0.47, 0.0), (0.38, 0.0), (0.3, 0.35), (0.27, 0.75),
+                  (0.15, 0.9), (0, 0.92)], (tx, ty, z0 + 4 * lv + 1.1), mat="Mat_Metal_Gunmetal", segs=16, cls="metal")
+    yoke = box((0.25, S - 2 * t, 0.25), (tx, ty, z0 + 4 * lv + 2.25), mat="Mat_Wood_Beam", cls="wood", grain="y")
+    parts.append(Part("Bell", [bell, yoke], "metal", kind="detail"))
+    spire = [box((S + 0.3, S + 0.3, 0.35), (tx, ty, zt + 0.175), mat="Mat_Plaster_Wall", cls="brick"),
+             hull([(tx - S / 2, ty - S / 2, zt + 0.35), (tx + S / 2, ty - S / 2, zt + 0.35), (tx + S / 2, ty + S / 2, zt + 0.35),
+                   (tx - S / 2, ty + S / 2, zt + 0.35), (tx, ty, zt + 8.5)], mat="Mat_Roof_Metal", cls="metal"),
+             box((0.12, 0.12, 1.6), (tx, ty, zt + 9.2), mat="Mat_Metal_Steel", cls="metal", frac=False),
+             box((0.9, 0.12, 0.12), (tx, ty, zt + 9.5), mat="Mat_Metal_Steel", cls="metal", frac=False)]
+    parts.append(Part("Spire", spire, "metal"))
+    return Asset(name, "Buildings", "structure", parts, n_impacts=3, dmg_r=2.2, ruin_h=0.3, spread=0.35, rubble_cell=4.0,
+                 chunk_scale=0.9, debris="brick", lod=(1.0, 0.6),
+                 ref="Iglesia rural de mamposteria revocada: nave 20 x 11 x 9 m, campanario 24 m + aguja 8.5 m")
+
+
+def build_mosque(name):
+    """Mezquita de barrio: sala de oracion 15 x 15 m (bloque revocado, 6.5 m), cupula de 8.4 m sobre tambor y alminar de 29 m."""
+    parts, t, unit = [], 0.4, (0.4, 0.2)
+    Ls, Hs, z0 = 15.0, 6.5, 0.2
+    parts.append(Part("Floor", [box((Ls + 0.2, Ls + 0.2, z0), (0, 0, z0 / 2), mat="Mat_Concrete_Base", cls="concrete")], "concrete"))
+    for side, ab in _box_runs(0, 0, Ls, Ls, t).items():
+        L = _run_len(ab)
+        ops = [(L * f, 1.2, 1.4, 2.6) for f in (0.2, 0.5, 0.8)]
+        if side == "S":
+            ops = [(L * 0.2, 1.2, 1.4, 2.6), (L * 0.5, 2.0, 0.0, 3.0), (L * 0.8, 1.2, 1.4, 2.6)]
+        parts.append(Part(f"Wall_{side}", wall_run(ab[0], ab[1], z0, Hs, t, ops, "Mat_Plaster_Desert", "cinder", unit), "cinder"))
+        for k, (uc, w, sill, hh) in enumerate(ops):
+            if sill > 0:
+                parts.append(window_part(f"Win_{side}{k}", ab[0], ab[1], z0, t, uc, w, sill, hh))
+            else:
+                parts.append(door_part(f"Door_{side}_L", ab[0], ab[1], z0, uc - w / 4, w / 2, hh))
+                parts.append(door_part(f"Door_{side}_R", ab[0], ab[1], z0, uc + w / 4, w / 2, hh))
+    zr = z0 + Hs
+    parts.append(Part("Roof_Slab", [box((Ls + 0.2, Ls + 0.2, 0.3), (0, 0, zr + 0.15), mat="Mat_Concrete_Base", cls="concrete")], "concrete"))
+    par = [box((Ls + 0.2, 0.2, 0.6), (0, sy * (Ls / 2), zr + 0.6), mat="Mat_Plaster_Desert", cls="cinder") for sy in (-1, 1)]
+    par += [box((0.2, Ls - 0.2, 0.6), (sx * (Ls / 2), 0, zr + 0.6), mat="Mat_Plaster_Desert", cls="cinder") for sx in (-1, 1)]
+    parts.append(Part("Parapet", par, "cinder"))
+    zd = zr + 0.3
+    parts.append(Part("Dome_Drum", [lathe([(4.2, 0), (4.2, 1.4), (3.9, 1.4), (3.9, 0)], (0, 0, zd), mat="Mat_Plaster_Desert", segs=24,
+                                          closed=True, smooth=False, cls="concrete")], "concrete"))
+    prof = [(4.2 * math.cos(math.radians(a)), 4.2 * math.sin(math.radians(a))) for a in range(0, 90, 15)] + [(0, 4.2), (0, 3.95)]
+    prof += [(3.95 * math.cos(math.radians(a)), 3.95 * math.sin(math.radians(a))) for a in range(75, -1, -15)]
+    parts.append(Part("Dome", [lathe(prof, (0, 0, zd + 1.4), mat="Mat_Dome_Tile", segs=24, closed=True, cls="concrete")], "concrete"))
+    mx, my = Ls / 2 + 1.5, -Ls / 2 + 1.3                     # alminar junto a la esquina SE
+    lv = 5.5
+    for k in range(4):
+        parts.append(Part(f"Minaret_L{k}", [lathe([(1.3, 0), (1.3, lv), (0.95, lv), (0.95, 0)], (mx, my, k * lv), mat="Mat_Plaster_Desert",
+                                                  segs=16, closed=True, smooth=False, cls="concrete")], "concrete"))
+    zb_ = 4 * lv
+    gal = [lathe([(2.0, 0), (2.0, 0.3), (0.95, 0.3), (0.95, 0)], (mx, my, zb_), mat="Mat_Plaster_Desert", segs=16, closed=True, smooth=False, cls="concrete"),
+           lathe([(2.0, 0.3), (2.0, 1.1), (1.92, 1.1), (1.92, 0.3)], (mx, my, zb_), mat="Mat_Plaster_Desert", segs=16, closed=True, smooth=False, cls="concrete")]
+    parts.append(Part("Minaret_Balcony", gal, "concrete"))
+    top = [lathe([(0.9, 0), (0.9, 3.2), (0.7, 3.2), (0.7, 0)], (mx, my, zb_ + 0.3), mat="Mat_Plaster_Desert", segs=12, closed=True, smooth=False, cls="concrete"),
+           lathe([(1.05, 0), (0, 3.0)], (mx, my, zb_ + 3.5), mat="Mat_Dome_Tile", segs=12, cls="concrete"),
+           strut((mx, my, zb_ + 6.4), (mx, my, zb_ + 7.4), 0.04, "Mat_Metal_Steel", 6, cls="metal", frac=False),
+           sphere(0.15, (mx, my, zb_ + 7.1), mat="Mat_Metal_Steel", segs=8, rings=5, cls="metal", frac=False)]
+    parts.append(Part("Minaret_Top", top, "concrete"))
+    parts.append(Part("Loudspeakers", [box((0.3, 0.25, 0.25), (mx + sx * 1.0, my + sy * 1.0, zb_ - 0.6), mat="Mat_Civil_White", cls="metal", frac=False)
+                                       for sx in (-1, 1) for sy in (-1, 1)], "metal", kind="detail"))
+    return Asset(name, "Buildings", "structure", parts, n_impacts=3, dmg_r=2.0, ruin_h=0.3, spread=0.35, rubble_cell=4.0,
+                 chunk_scale=0.9, debris="cinder", lod=(1.0, 0.6),
+                 ref="Mezquita de barrio: sala 15 x 15 x 6.5 m, cupula 8.4 m sobre tambor, alminar 29 m con balcon a 22 m")
+
+
+def build_factory(name):
+    """Nave industrial de porticos de acero 30 x 18 m (alero 8 m, cumbrera 10 m), zocalo de ladrillo, chapa y vidrio."""
+    Lx, Wy, He, Hr, bays, z0 = 30.0, 18.0, 8.0, 10.0, 5, 0.25
+    bx = Lx / bays
+    parts = [Part("Floor", [box((Lx + 0.4, Wy + 0.4, z0), (0, 0, z0 / 2), mat="Mat_Concrete_Base", cls="concrete")], "concrete")]
+    th = math.degrees(math.atan2(Hr - He, Wy / 2))
+    run = math.hypot(Wy / 2, Hr - He) + 0.35
+    for k in range(bays + 1):
+        x = -Lx / 2 + 0.2 + k * (Lx - 0.4) / bays
+        fr = [box((0.3, 0.45, He), (x, sy * (Wy / 2 - 0.3), z0 + He / 2), mat="Mat_Steel_Galvanized", cls="metal") for sy in (-1, 1)]
+        fr += [beam((x, sy * (Wy / 2 - 0.3), z0 + He + 0.2), (x, 0, z0 + Hr), 0.3, 0.55, mat="Mat_Steel_Galvanized", cls="metal", grain=None)
+               for sy in (-1, 1)]
+        parts.append(Part(f"Frame_{k}", fr, "metal"))
+    for k in range(bays):
+        xc = -Lx / 2 + bx * (k + 0.5)
+        for sy, sd in ((-1, "S"), (1, "N")):
+            parts.append(Part(f"Roof_{sd}{k}", [box((bx, run, 0.08), (xc, sy * Wy / 4, z0 + (He + Hr) / 2 + 0.42), (sy * -th, 0, 0),
+                                                    mat="Mat_Roof_Metal", cls="metal")], "metal"))
+            yw = sy * (Wy / 2)
+            parts.append(Part(f"Base_{sd}{k}", [box((bx, 0.25, 1.2), (xc, yw, z0 + 0.6), mat="Mat_Brick_Wall", cls="brick")], "brick"))
+            clad = [box((bx, 0.06, 4.3), (xc, yw + sy * 0.05, z0 + 1.2 + 2.15), mat="Mat_Roof_Metal", cls="metal"),
+                    box((bx, 0.06, 1.0), (xc, yw + sy * 0.05, z0 + 7.0 + 0.5), mat="Mat_Roof_Metal", cls="metal")]
+            parts.append(Part(f"Clad_{sd}{k}", clad, "metal"))
+            parts.append(Part(f"Win_{sd}{k}", [box((bx - 0.1, 0.03, 1.5), (xc, yw + sy * 0.05, z0 + 5.5 + 0.75), mat="Mat_Glass_Window", cls="glass")],
+                              "glass", kind="glass"))
+    rz = lambda y: He + (Hr - He) * (1 - abs(y) / (Wy / 2))          # noqa: E731  (cota de cubierta en y)
+    for sx, sd in ((-1, "W"), (1, "E")):
+        xe = sx * (Lx / 2 + 0.05)
+        if sx < 0:
+            parts.append(Part("Base_W", [box((0.25, Wy, 1.2), (sx * Lx / 2, 0, z0 + 0.6), mat="Mat_Brick_Wall", cls="brick")], "brick"))
+            g = prism([(-Wy / 2, 1.2), (Wy / 2, 1.2), (Wy / 2, He), (0, Hr), (-Wy / 2, He)], 0.06, axis='x', offset=xe, mat="Mat_Roof_Metal", cls="metal")
+            g.transform(Matrix.Translation((0, 0, z0)))
+            parts.append(Part("Clad_W", [g], "metal"))
+        else:
+            dw = 2.5
+            for k, sy in enumerate((-1, 1)):
+                parts.append(Part(f"Base_E{k}", [box((0.25, Wy / 2 - dw, 1.2), (sx * Lx / 2, sy * (Wy / 2 + dw) / 2, z0 + 0.6),
+                                                     mat="Mat_Brick_Wall", cls="brick")], "brick"))
+                prof = [(sy * dw, 1.2), (sy * Wy / 2, 1.2), (sy * Wy / 2, He), (sy * dw, rz(dw))]
+                g = prism(prof if sy > 0 else prof[::-1], 0.06, axis='x', offset=xe, mat="Mat_Roof_Metal", cls="metal")
+                g.transform(Matrix.Translation((0, 0, z0)))
+                parts.append(Part(f"Clad_E{k}", [g], "metal"))
+            g = prism([(-dw, 5.2), (dw, 5.2), (dw, rz(dw)), (0, Hr), (-dw, rz(dw))], 0.06, axis='x', offset=xe, mat="Mat_Roof_Metal", cls="metal")
+            g.transform(Matrix.Translation((0, 0, z0)))
+            parts.append(Part("Clad_E_Top", [g], "metal"))
+            parts.append(Part("RollerDoor", [box((0.08, 2 * dw, 5.0), (Lx / 2 + 0.14, 0, z0 + 2.5), mat="Mat_Roof_Metal", cls="metal")], "metal",
+                              kind="door", pivot=(Lx / 2, 0, z0 + 5.0), axis=(0, 0, 1), joint="slide"))
+    crane = [box((Lx - 1.0, 0.3, 0.5), (0, sy * (Wy / 2 - 0.9), z0 + 6.3), mat="Mat_Military_Grey", cls="metal") for sy in (-1, 1)]
+    crane.append(box((0.6, Wy - 1.6, 0.6), (4.0, 0, z0 + 6.85), mat="Mat_Bus_Paint", cls="metal"))
+    parts.append(Part("Overhead_Crane", crane, "metal"))
+    return Asset(name, "Buildings", "structure", parts, n_impacts=3, dmg_r=2.5, ruin_h=0.25, spread=0.4, rubble_cell=5.0,
+                 chunk_scale=0.9, debris="metal", lod=(1.0, 0.6),
+                 ref="Nave industrial 30 x 18 m, porticos cada 6 m, alero 8 m, cumbrera 10 m, puerta enrollable 5 x 5 m")
+
+
+def build_chimney(name):
+    """Chimenea industrial de ladrillo 35 m (base 4.4 m): se parte y cae como un tronco."""
+    prof = [(0, 0), (2.2, 0), (2.2, 3.0), (1.6, 3.2), (0.95, 35.0), (0.7, 35.0), (1.3, 3.2), (1.3, 0.4), (0, 0.4)]
+    trunk = lathe(prof, mat="Mat_Brick_Wall", segs=20, smooth=False, cls="brick", grain="z")
+    bands = [lathe([(r + 0.06, 0), (r + 0.06, 0.25), (r - 0.05, 0.25), (r - 0.05, 0)], (0, 0, z), mat="Mat_Metal_Gunmetal", segs=20, closed=True,
+                   smooth=False, cls="metal", frac=False) for r, z in ((1.42, 12.0), (1.2, 22.0), (0.98, 34.0))]
+    return Asset(name, "Buildings", "tree", [Part("Shaft", [trunk], "brick", kind="trunk"), Part("Bands", bands, "metal", kind="branch")],
+                 cut_h=6.0, lod=(1.0, 0.5), ref="Chimenea industrial de ladrillo 35 m, fuste conico 3.2 -> 1.9 m")
+
+
+def build_gas_station(name):
+    """Gasolinera: marquesina 14 x 9 m a 5 m, 2 islas de surtidores, tienda 8 x 6 m y mastil de precios."""
+    parts = [Part("Forecourt", [box((18.0, 22.0, 0.15), (0, 2.0, 0.075), mat="Mat_Concrete_Base", cls="concrete")], "concrete")]
+    for i, (sx, sy) in enumerate(((1, 1), (1, -1), (-1, 1), (-1, -1))):
+        parts.append(Part(f"Column_{i}", [box((0.4, 0.4, 5.0), (sx * 4.5, sy * 2.5, 0.15 + 2.5), mat="Mat_Civil_White", cls="concrete")], "concrete"))
+    can = [box((14.0, 9.0, 0.25), (0, 0, 5.3), mat="Mat_Steel_Galvanized", cls="metal")]
+    can += [box((14.2, 0.1, 0.8), (0, sy * 4.55, 5.4), mat="Mat_Civil_White", cls="metal") for sy in (-1, 1)]
+    can += [box((0.1, 9.2, 0.8), (sx * 7.05, 0, 5.4), mat="Mat_Civil_White", cls="metal") for sx in (-1, 1)]
+    can.append(box((10.0, 0.04, 0.3), (0, -4.62, 5.4), mat="Mat_Bus_Paint", cls="metal", frac=False))
+    parts.append(Part("Canopy", can, "metal"))
+    for k, x in enumerate((-2.0, 2.0)):
+        isl = [box((1.0, 5.0, 0.18), (x, 0, 0.24), mat="Mat_Concrete_Base", cls="concrete")]
+        for y in (-1.3, 1.3):
+            isl += [box((0.55, 0.9, 1.75), (x, y, 0.33 + 0.875), mat="Mat_Civil_White", cls="metal"),
+                    box((0.57, 0.92, 0.18), (x, y, 0.33 + 1.6), mat="Mat_Bus_Paint", cls="metal", frac=False),
+                    box((0.02, 0.4, 0.3), (x + 0.29, y, 1.3), mat="Mat_Glass_Window", cls="glass", frac=False)]
+        parts.append(Part(f"PumpIsland_{k}", isl, "metal"))
+    shop = build_house(name, 8.0, 6.0, 1, fh=3.2, wall_mat="Mat_Plaster_Wall", wcls="cinder", roof="flat", parapet=True, nwin=(3, 1))
+    parts += _move(shop, (0, 10.0, 0.15))
+    sign = [box((0.35, 0.35, 8.0), (8.0, -6.0, 4.0), mat="Mat_Steel_Galvanized", cls="metal"),
+            box((2.2, 0.3, 2.6), (8.0, -6.0, 7.2), mat="Mat_Bus_Paint", cls="metal")]
+    parts.append(Part("PriceSign", sign, "metal"))
+    return Asset(name, "Buildings", "structure", parts, n_impacts=3, dmg_r=2.0, ruin_h=0.3, spread=0.4, rubble_cell=4.0,
+                 debris="cinder", lod=(1.0, 0.6), ref="Estacion de servicio: marquesina 14 x 9 m a 5 m, 4 surtidores, tienda 8 x 6 m")
+
+
+def build_ruin_wall(name):
+    """Muro de ladrillo ya en ruinas (9 m, hasta 4.5 m) con hueco de ventana y escombro al pie."""
+    rng = random.Random(77)
+    parts, h = [], 3.0
+    x = -4.5
+    while x < 4.49:
+        w = min(0.6, 4.5 - x)
+        h = max(0.6, min(4.5, h + rng.uniform(-0.9, 0.8)))
+        hh = h if not (-0.9 < x + w / 2 < 0.9) else min(h, 1.0)     # hueco de ventana sin dintel
+        parts.append(Part(f"Strip_{len(parts)}", [mbox((w, 0.36, hh), (x + w / 2, 0, hh / 2), mat="Mat_Brick_Wall", cls="brick",
+                                                       unit=(0.25, 0.125), u0=x)], "brick"))
+        x += w
+    pile = [mound(V(rng.uniform(-3, 3), -0.9, 0.0), rng.uniform(0.8, 1.4), rng.uniform(0.35, 0.6), "Mat_Brick_Interior", rng, cls="brick")
+            for _ in range(3)]
+    pile += [box((0.25, 0.12, 0.08), (rng.uniform(-4, 4), rng.uniform(-1.6, -0.4), 0.04), (0, 0, rng.uniform(0, 180)),
+                 mat="Mat_Brick_Wall", cls="brick", frac=False) for _ in range(20)]
+    parts.append(Part("Rubble", pile, "brick", kind="detail"))
+    return Asset(name, "Buildings", "structure", parts, n_impacts=2, dmg_r=1.2, ruin_h=0.3, spread=0.4, rubble_cell=2.0,
+                 debris="brick", lod=(1.0, 0.6), ref="Muro de ladrillo macizo de 1 pie (0.36 m) parcialmente derruido")
+
+
+def _rubble_pile(name, mat, cls, beams):
+    rng = random.Random(len(name) * 31)
+    pcs = [mound(V(0, 0, 0), 3.2, 1.3, mat, rng, cls=cls), mound(V(1.6, 0.8, 0), 1.8, 0.8, mat, rng, cls=cls)]
+    for _ in range(26):
+        a, r = rng.uniform(0, 2 * math.pi), rng.uniform(0.3, 3.4)
+        z = max(0.1, 1.2 * (1 - r / 3.6))
+        if cls == "concrete":
+            pcs.append(box((rng.uniform(0.4, 1.4), rng.uniform(0.3, 1.0), rng.uniform(0.15, 0.3)), (math.cos(a) * r, math.sin(a) * r, z),
+                           (rng.uniform(-35, 35), rng.uniform(-35, 35), rng.uniform(0, 180)), mat="Mat_Concrete_Base", cls="concrete", frac=False))
+        else:
+            pcs.append(ico(rng.uniform(0.15, 0.35), (math.cos(a) * r, math.sin(a) * r, z), mat="Mat_Brick_Wall", subdiv=1, rough=0.2,
+                           seed=rng.randint(0, 999), cls="brick", frac=False))
+    for _ in range(beams):
+        a = rng.uniform(0, 2 * math.pi)
+        p0 = V(math.cos(a) * 2.8, math.sin(a) * 2.8, 0.05)
+        p1 = V(math.cos(a + 2.4) * 0.8, math.sin(a + 2.4) * 0.8, rng.uniform(0.8, 1.6))
+        if cls == "concrete":
+            pcs.append(strut(p0, p1, 0.012, "Mat_Rebar_Rust", 4, cls="metal", frac=False))
+        else:
+            pcs.append(beam(p0, p1, 0.18, 0.18, mat="Mat_Wood_Charred", cls="wood", frac=False))
+    return pcs
+
+
+def build_rubble_concrete(name):
+    return Asset(name, "Terrain", "static", [Part("Rubble", _rubble_pile(name, "Mat_Concrete_Interior", "concrete", 10), "concrete")],
+                 lod=(1.0, 0.5), ref="Monton de escombro de hormigon armado ~7 m con armaduras retorcidas")
+
+
+def build_rubble_brick(name):
+    return Asset(name, "Terrain", "static", [Part("Rubble", _rubble_pile(name, "Mat_Brick_Interior", "brick", 5), "brick")],
+                 lod=(1.0, 0.5), ref="Monton de cascote de ladrillo ~7 m con vigas de madera quemadas")
+
+
+# ------------------------------- militar: campamento ----------------------------------
+def build_checkpoint(name):
+    """Control de carretera: garita 2.2 x 2.2 m, barrera de 6 m (bisagra), chicane de barreras Jersey, sacos y senal STOP."""
+    parts = []
+    gx, gy, t = -1.5, -6.0, 0.2
+    for side, ab in _box_runs(gx, gy, 2.2, 2.2, t).items():
+        L = _run_len(ab)
+        ops = [(L / 2, 0.9, 0.0, 2.0)] if side == "W" else [(L / 2, 1.2, 1.0, 1.0)]
+        parts.append(Part(f"Booth_Wall_{side}", wall_run(ab[0], ab[1], 0.0, 2.5, t, ops, "Mat_Plaster_Wall", "cinder"), "cinder"))
+        for k, (uc, w, sill, hh) in enumerate(ops):
+            if sill > 0:
+                parts.append(window_part(f"Booth_Win_{side}", ab[0], ab[1], 0.0, t, uc, w, sill, hh))
+    parts.append(Part("Booth_Roof", [box((3.0, 3.0, 0.15), (gx, gy, 2.575), mat="Mat_Roof_Metal", cls="metal")], "metal"))
+    post = [box((0.4, 0.4, 1.0), (0, -3.8, 0.5), mat="Mat_Civil_White", cls="metal"),
+            box((0.3, 0.6, 0.35), (0, -4.3, 1.0), mat="Mat_Metal_Gunmetal", cls="metal")]
+    parts.append(Part("Barrier_Post", post, "metal"))
+    boom = []
+    for k in range(6):                                     # franjas rojas y blancas
+        boom.append(box((0.1, 1.0, 0.1), (0, -3.3 + k * 1.0, 1.05), mat="Mat_Sign_Red" if k % 2 else "Mat_Road_Paint", cls="metal"))
+    parts.append(Part("Barrier_Boom", boom, "metal", kind="door", pivot=(0, -3.8, 1.05), axis=(1, 0, 0), joint="hinge"))
+    prof = [(-0.305, 0), (0.305, 0), (0.305, 0.075), (0.19, 0.33), (0.075, 0.81), (-0.075, 0.81), (-0.19, 0.33), (-0.305, 0.075)]
+    for k, (x, y) in enumerate(((10.0, -2.0), (16.0, 2.0), (-10.0, 2.0), (-16.0, -2.0))):
+        j = prism(prof, 3.0, axis='x', mat="Mat_Concrete_Base", cls="concrete")
+        j.transform(Matrix.Translation((x, y, 0)) @ Matrix.Rotation(math.pi / 2, 4, 'Z'))
+        parts.append(Part(f"Jersey_{k}", [j], "concrete"))
+    for row in range(3):
+        for i in range(6):
+            bag = box((0.58, 0.3, 0.14), (2.0 + i * 0.6 + (row % 2) * 0.3 - 1.5, -8.0, 0.07 + row * 0.14), mat="Mat_Fabric_Sandbag", bevel=0.03, cls="fabric")
+            parts.append(Part(f"Bag_{row}_{i}", [bag], "fabric"))
+    stop = [strut((3.0, -4.6, 0), (3.0, -4.6, 2.2), 0.03, "Mat_Steel_Galvanized", 6, cls="metal"),
+            cyl(0.38, 0.03, (3.0, -4.62, 2.5), (90, 22.5, 0), mat="Mat_Sign_Red", segs=8, cls="metal", frac=False)]
+    parts.append(Part("Stop_Sign", stop, "metal", kind="detail"))
+    lamp = [strut((-3.5, -4.8, 0), (-3.5, -4.8, 5.0), 0.06, "Mat_Steel_Galvanized", 6, cls="metal"),
+            box((0.5, 0.35, 0.3), (-3.5, -4.6, 5.0), mat="Mat_Military_Grey", cls="metal"),
+            box((0.45, 0.02, 0.25), (-3.5, -4.42, 5.0), mat="Mat_Light_Lens", cls="glass", frac=False)]
+    parts.append(Part("Floodlight", lamp, "metal", kind="detail"))
+    return Asset(name, "Military", "structure", parts, n_impacts=2, dmg_r=1.2, ruin_h=0.35, spread=0.45, rubble_cell=2.0,
+                 debris="concrete", lod=(1.0, 0.6), ref="Puesto de control vial: garita, barrera basculante 6 m, chicane de 4 Jersey")
+
+
+def build_tent_gp(name):
+    """Tienda GP Medium (US): 4.88 x 9.75 m, cumbrera 3.05 m, paredes laterales 1.68 m, vientos y estacas."""
+    Wt, Lt, Hr, He, t = 4.88, 9.75, 3.05, 1.68, 0.02
+    C = "Mat_Tent_Canvas"
+    th = math.degrees(math.atan2(Hr - He, Wt / 2))
+    run = math.hypot(Wt / 2, Hr - He) + 0.12
+    parts = []
+    for sy, sd in ((-1, "S"), (1, "N")):
+        zc = He + (Hr - He) / 2 + 0.03
+        parts.append(Part(f"Roof_{sd}", [box((Lt + 0.25, run, t), (0, sy * Wt / 4, zc), (sy * -th, 0, 0), mat=C, cls="fabric")], "fabric"))
+        parts.append(Part(f"Side_{sd}", [box((Lt, t, He), (0, sy * Wt / 2, He / 2), mat=C, cls="fabric")], "fabric"))
+    for sx, sd in ((-1, "W"), (1, "E")):
+        e = prism([(-Wt / 2, 0), (Wt / 2, 0), (Wt / 2, He), (0, Hr), (-Wt / 2, He)], t, axis='x', offset=sx * Lt / 2, mat=C, cls="fabric")
+        parts.append(Part(f"End_{sd}", [e], "fabric"))
+    poles = [cyl(0.045, Hr, (x, 0, Hr / 2), mat="Mat_Pole_Wood", segs=8, cls="wood", grain="z") for x in (-Lt / 4, Lt / 4)]
+    poles.append(box((Lt - 0.2, 0.08, 0.08), (0, 0, Hr - 0.06), mat="Mat_Wood_Beam", cls="wood", grain="x"))
+    parts.append(Part("Poles", poles, "wood"))
+    guys = []
+    for sy in (-1, 1):
+        for k in range(7):
+            x = -Lt / 2 + 0.4 + k * (Lt - 0.8) / 6
+            guys.append(strut((x, sy * Wt / 2, He), (x, sy * (Wt / 2 + 1.7), 0.05), 0.008, "Mat_Fabric_Canvas", 3, cls="fabric", frac=False))
+            guys.append(box((0.05, 0.05, 0.3), (x, sy * (Wt / 2 + 1.75), 0.1), mat="Mat_Metal_Gunmetal", cls="metal", frac=False))
+    parts.append(Part("GuyLines", guys, "fabric", kind="detail"))
+    cots = [box((1.9, 0.7, 0.05), (-Lt / 2 + 1.3 + k * 2.2, sy * 1.5, 0.45), mat="Mat_Fabric_Canvas", cls="fabric", frac=False)
+            for k in range(4) for sy in (-1, 1)]
+    parts.append(Part("Cots", cots, "fabric", kind="detail"))
+    return Asset(name, "Military", "structure", parts, n_impacts=1, dmg_r=1.4, ruin_h=0.15, spread=0.5, rubble_cell=2.0,
+                 debris="fabric", lod=(1.0, 0.5), ref="Tent, General Purpose, Medium: 16 x 32 ft, cumbrera 10 ft, pared 5.5 ft")
+
+
+def build_camo_net(name):
+    """Red de enmascaramiento 10 x 8 m sobre 5 postes (central 4 m), bordes estaquillados."""
+    rng = random.Random(4242)
+    nx, ny, Lx, Ly = 21, 17, 10.0, 8.0
+    poles = [(0.0, 0.0, 4.0), (3.5, 2.6, 3.2), (-3.5, 2.6, 3.2), (3.5, -2.6, 3.2), (-3.5, -2.6, 3.2)]
+    bm = bmesh.new()
+    vs = []
+    for j in range(ny):
+        row = []
+        for i in range(nx):
+            x, y = -Lx / 2 + Lx * i / (nx - 1), -Ly / 2 + Ly * j / (ny - 1)
+            tent = max(ph - 0.42 * math.hypot(x - px, y - py) ** 1.15 for px, py, ph in poles)
+            edge = min(Lx / 2 - abs(x), Ly / 2 - abs(y))
+            z = max(0.05, min(tent, 0.15 + 1.6 * edge)) + rng.uniform(-0.06, 0.06)
+            row.append(bm.verts.new((x, y, z)))
+        vs.append(row)
+    for j in range(ny - 1):
+        for i in range(nx - 1):
+            bm.faces.new((vs[j][i], vs[j][i + 1], vs[j + 1][i + 1], vs[j + 1][i]))
+    solidify(bm, 0.03)
+    for f in bm.faces:                                     # la red se ve igual por las dos caras
+        f.material_index = 0
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.normal_update()
+    net = Piece(bm, "Mat_Camo_Net", "fabric")
+    parts = [Part("Net", [net], "fabric")]
+    parts.append(Part("Poles", [cyl(0.04, ph - 0.03, (px, py, (ph - 0.03) / 2), mat="Mat_Pole_Wood", segs=6, cls="wood", grain="z")
+                                for px, py, ph in poles], "wood"))
+    return Asset(name, "Military", "structure", parts, n_impacts=1, dmg_r=1.6, ruin_h=0.15, spread=0.4, rubble_cell=2.5,
+                 debris="fabric", lod=(1.0, 0.5), ref="Red de enmascaramiento LCSS 10 x 8 m sobre postes (cubre un vehiculo)")
+
+
+def build_mortar_pit(name):
+    """Asentamiento de mortero de 81 mm: pozo de 2.4 m y 1 m de fondo, anillo de sacos y M252 con municion."""
+    parts = trench_path_parts([(-0.8, 0.0), (0.8, 0.0)], depth=1.0, w=2.4, lining="planks", berm=False)
+    R = 2.0
+    for row in range(3):
+        n = 22
+        for i in range(n):
+            a = 2 * math.pi * (i + 0.5 * (row % 2)) / n
+            p = V(math.cos(a) * R, math.sin(a) * R, 1.0 + 0.07 + row * 0.13)
+            parts.append(Part(f"Bag_{row}_{i}", [box((0.58, 0.3, 0.14), tuple(p), (0, 0, math.degrees(a) + 90), mat="Mat_Fabric_Sandbag",
+                                                     bevel=0.03, cls="fabric")], "fabric"))
+    m = [cyl(0.28, 0.06, (0, 0, 0.03), mat="Mat_Metal_Gunmetal", segs=12, cls="metal"),
+         strut((0, 0, 0.08), (0, 0.82, 1.05), 0.045, "Mat_Military_Olive", 10, cls="metal")]
+    m += [strut((0, 0.5, 0.68), (sx * 0.3, 0.72, 0.02), 0.015, "Mat_Metal_Gunmetal", 4, cls="metal") for sx in (-1, 1)]
+    parts.append(Part("Mortar_M252", m, "metal", kind="detail"))
+    parts.append(Part("Ammo", [box((0.55, 0.3, 0.25), (-0.6 + k * 0.6, -0.7, 0.125), mat="Mat_Crate_Base", cls="wood", grain="x") for k in range(3)],
+                      "wood", kind="detail"))
+    return Asset(name, "Fortifications", "structure", parts, n_impacts=1, dmg_r=0.9, ruin_h=0.35, spread=0.5, rubble_cell=1.5,
+                 debris="fabric", ground_offset=-1.0, holes=list(TRENCH_HOLES), lod=(1.0,), ref="Asentamiento de mortero M252 81 mm (FM 3-22.90)")
+
+
+def build_radar_trailer(name):
+    """Radar de vigilancia aerea sobre remolque (tipo AN/MPQ-64 Sentinel): antena 2.4 x 1.4 m giratoria."""
+    P, wr = "Mat_Military_Green", 0.45
+    parts = []
+    for i, x in enumerate((-0.55, -1.55)):
+        for side, sy in (("L", 1), ("R", -1)):
+            parts.append(tire_wheel(x, sy * 0.95, wr, wr, 0.32, f"Wheel_{i}{side}", P))
+    body = [box((4.6, 2.1, 0.9), (-0.4, 0, 1.0), mat=P, cls="metal"),
+            box((1.1, 1.8, 0.9), (1.5, 0, 1.9), mat=P, cls="metal")]
+    parts.append(Part("Trailer", body, "metal", kind="hull"))
+    bar = [strut((1.85, sy * 0.8, 0.75), (3.3, 0, 0.55), 0.05, "Mat_Metal_Gunmetal", 6, cls="metal") for sy in (-1, 1)]
+    bar += [strut((xx, sy * 1.2, 0.8), (xx, sy * 1.45, 0.0), 0.04, "Mat_Metal_Gunmetal", 4, cls="metal") for xx in (1.6, -2.5) for sy in (-1, 1)]
+    parts.append(Part("Drawbar_Jacks", bar, "metal", kind="detail"))
+    tur = [cyl(0.55, 0.3, (-0.8, 0, 1.6), mat=P, segs=14, cls="metal"), box((0.6, 0.6, 1.0), (-0.8, 0, 2.2), mat=P, cls="metal")]
+    parts.append(Part("Antenna_Mount", tur, "metal", kind="turret", pivot=(-0.8, 0, 1.45), axis=(0, 0, 1), joint="yaw"))
+    ant = [box((0.28, 2.4, 1.4), (-0.55, 0, 3.15), (0, -12, 0), mat=P, cls="metal"),
+           box((0.05, 2.3, 1.3), (-0.39, 0, 3.17), (0, -12, 0), mat="Mat_Military_Grey", cls="metal", frac=False)]
+    parts.append(Part("Antenna_Array", ant, "metal", kind="gun", tags=("turret",), pivot=(-0.8, 0, 2.7), axis=(0, 1, 0), joint="pitch"))
+    return Asset(name, "AirDefense", "vehicle", parts, forward_x=True, mass=3800, lod=(1.0, 0.5, 0.2),
+                 ref="Radar 3D de vigilancia sobre remolque de 2 ejes (clase AN/MPQ-64 Sentinel), antena a ~3.2 m")
+
+
+def build_market_stall(name):
+    """Puesto de mercado 3 x 2 m: estructura de madera, toldo de lona, mostrador y cajas."""
+    posts = [beam((sx * 1.45, sy * 0.95, 0), (sx * 1.45, sy * 0.95, 2.4 if sy < 0 else 2.0), 0.08, mat="Mat_Wood_Beam", cls="wood")
+             for sx in (-1, 1) for sy in (-1, 1)]
+    parts = [Part("Frame", posts, "wood")]
+    aw = math.degrees(math.atan2(0.4, 1.9))
+    parts.append(Part("Awning", [box((3.3, 2.3, 0.02), (0, -0.05, 2.22), (aw, 0, 0), mat="Mat_Fabric_Canvas", cls="fabric")], "fabric"))
+    parts.append(Part("Counter", [box((2.9, 0.8, 0.06), (0, -0.55, 0.9), mat="Mat_Wood_Plank", cls="wood", grain="x"),
+                                  box((2.9, 0.04, 0.85), (0, -0.93, 0.45), mat="Mat_Wood_Plank", cls="wood", grain="x")], "wood"))
+    crates = [box((0.5, 0.35, 0.3), (-1.0 + k * 0.55, -0.55, 1.08), mat="Mat_Crate_Base", cls="wood", grain="x") for k in range(4)]
+    crates += [box((0.5, 0.35, 0.3), (-0.8 + k * 0.6, 0.5, 0.15 + 0.3 * (k % 2)), mat="Mat_Crate_Base", cls="wood", grain="x") for k in range(3)]
+    parts.append(Part("Crates", crates, "wood", kind="detail"))
+    return Asset(name, "Props", "structure", parts, n_impacts=1, dmg_r=0.6, ruin_h=0.3, spread=0.5, rubble_cell=1.0,
+                 debris="wood", lod=(1.0, 0.5), ref="Puesto de zoco/mercado 3 x 2 m")
+
+
+# ==================================================================================
 # CATALOGO + MAIN
 # ==================================================================================
 def catalog():
@@ -3755,6 +4752,18 @@ def catalog():
     c += [("Veh_Technical_Hilux_DShK", build_pickup), ("Civ_Car_Sedan", build_sedan), ("Veh_ENG_D9R_Armored", build_d9r),
           ("AD_CRAM_Centurion", build_cram), ("Air_Heli_AH-6_LittleBird", build_littlebird), ("Air_Drone_Shahed-136", build_shahed),
           ("Air_Drone_Quadcopter", build_quad)]
+    # --- v4: infraestructura de mapa, mas vehiculos/aeronaves y edificios de zona de guerra
+    c += [("Map_Road_Asphalt_12m", build_road_asphalt), ("Map_Road_Intersection_14m", build_road_intersection),
+          ("Map_Road_Dirt_12m", build_road_dirt), ("Map_Pylon_HV_30m", build_pylon), ("Map_Radio_Mast_40m", build_radio_mast),
+          ("Map_Water_Tower", build_water_tower), ("Map_Fuel_Tank_16m", build_fuel_tank), ("Map_Bridge_Concrete_36m", build_bridge),
+          ("Map_Helipad_20m", build_helipad), ("Map_Runway_Section_60m", build_runway), ("Prop_Street_Lamp", build_street_lamp),
+          ("Prop_Billboard", build_billboard)]
+    c += [(n, build_truck_x) for n in TRUCKS] + [("Air_UAV_Bayraktar_TB2", build_tb2)]
+    c += [("Bld_Church_BellTower", build_church), ("Bld_Mosque_Minaret", build_mosque), ("Bld_Factory_Hall", build_factory),
+          ("Bld_Chimney_Brick_35m", build_chimney), ("Bld_Gas_Station", build_gas_station), ("Bld_Ruin_Wall_Brick", build_ruin_wall),
+          ("Ter_Rubble_Concrete", build_rubble_concrete), ("Ter_Rubble_Brick", build_rubble_brick),
+          ("Mil_Checkpoint", build_checkpoint), ("Mil_Tent_GP_Medium", build_tent_gp), ("Mil_Camo_Net_10x8", build_camo_net),
+          ("Fort_Mortar_Pit_81mm", build_mortar_pit), ("AD_Radar_Trailer", build_radar_trailer), ("Prop_Market_Stall", build_market_stall)]
     return c
 
 
@@ -3762,7 +4771,16 @@ VARIANT_SKIP = {"Winter": {"Veg_Tree_Palm"}, "Desert": set(), "Temperate": set()
 
 
 def main():
-    global VARIANT
+    """blender -b --python generate_destructible_assets.py -- [--out DIR] [--only A,B] [--variants Temperate,Desert]"""
+    global VARIANT, OUTPUT_DIR, ONLY, VARIANTS
+    argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    for i, a in enumerate(argv[:-1]):
+        if a == "--out":
+            OUTPUT_DIR = os.path.abspath(os.path.expanduser(argv[i + 1]))
+        elif a == "--only":
+            ONLY = [x for x in argv[i + 1].split(",") if x]
+        elif a == "--variants":
+            VARIANTS = [x for x in argv[i + 1].split(",") if x]
     t0 = time.time()
     bpy.ops.wm.read_factory_settings(use_empty=True)          # escena inicial limpia
     reset_scene()
@@ -3786,7 +4804,7 @@ def main():
                 fails.append({"asset": nm, "variant": var, "error": str(exc)})
     VARIANT = "Temperate"
     with open(os.path.join(OUTPUT_DIR, "catalog.json"), "w", encoding="utf-8") as fh:
-        json.dump({"generator": "Unity Destructible Military Asset Factory v3", "seed": SEED,
+        json.dump({"generator": "Unity Destructible Military Asset Factory v4", "seed": SEED,
                    "unity_import": {"scale_factor": 1, "convert_units": True, "read_write": "ON para *_Chunks_* (MeshCollider runtime)",
                                     "materials": "Search and Remap por nombre (Mat_*) -> materiales compartidos"},
                    "states": {"0": "Intact", "1": "Damaged", "2": "Destroyed", "3": "Chunks_L1", "4": "Chunks_L2",
